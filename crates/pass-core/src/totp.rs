@@ -196,8 +196,7 @@ mod tests {
     // RFC uses 20/32/64-byte seeds for SHA-1/256/512 respectively.
     const SEED20: &[u8] = b"12345678901234567890";
     const SEED32: &[u8] = b"12345678901234567890123456789012";
-    const SEED64: &[u8] =
-        b"1234567890123456789012345678901234567890123456789012345678901234";
+    const SEED64: &[u8] = b"1234567890123456789012345678901234567890123456789012345678901234";
 
     fn totp(secret: &[u8], algo: TotpAlgorithm) -> Totp {
         Totp {
@@ -237,10 +236,9 @@ mod tests {
 
     #[test]
     fn uri_parsing_defaults_and_overrides() {
-        let t = Totp::from_uri(
-            "otpauth://totp/Example:kevin?secret=JBSWY3DPEHPK3PXP&issuer=Example",
-        )
-        .unwrap();
+        let t =
+            Totp::from_uri("otpauth://totp/Example:kevin?secret=JBSWY3DPEHPK3PXP&issuer=Example")
+                .unwrap();
         assert_eq!(t.digits, 6);
         assert_eq!(t.period, 30);
         assert_eq!(t.algorithm, TotpAlgorithm::Sha1);

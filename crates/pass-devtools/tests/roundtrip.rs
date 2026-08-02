@@ -124,7 +124,10 @@ const TRICKY_CONTENTS: &[(&str, &[u8])] = &[
         b"pw\nline two\n\ntrailing spaces  \nno trailing newline",
     ),
     ("unicode/caf\u{e9}", "pw\nnote: naïve ✓\n".as_bytes()),
-    ("otp", b"pw\notpauth://totp/X?secret=JBSWY3DPEHPK3PXP&digits=8\n"),
+    (
+        "otp",
+        b"pw\notpauth://totp/X?secret=JBSWY3DPEHPK3PXP&digits=8\n",
+    ),
 ];
 
 #[test]
@@ -135,7 +138,11 @@ fn passage_reads_what_we_write_recipients_file() {
     let identities = dir.join("identities");
     fs::copy(fixtures_root().join("keys/age-key-a.txt"), &identities).unwrap();
     let pub_a = fs::read_to_string(fixtures_root().join("keys/age-key-a.pub")).unwrap();
-    fs::write(store_dir.join(".age-recipients"), format!("# test\n\n{pub_a}")).unwrap();
+    fs::write(
+        store_dir.join(".age-recipients"),
+        format!("# test\n\n{pub_a}"),
+    )
+    .unwrap();
 
     let store = Store::open(&store_dir, StoreFormat::Passage).unwrap();
     let backend = AgeCliBackend {
@@ -217,10 +224,18 @@ fn reencrypt_subtree_follows_recipient_change() {
     let root_content: &[u8] = b"root-pw\n";
     let work_content: &[u8] = b"work-pw\nnote: rekey me\n";
     store
-        .write_entry("rootentry", &Entry::from_bytes(root_content.to_vec()), &backend)
+        .write_entry(
+            "rootentry",
+            &Entry::from_bytes(root_content.to_vec()),
+            &backend,
+        )
         .unwrap();
     store
-        .write_entry("work/jira", &Entry::from_bytes(work_content.to_vec()), &backend)
+        .write_entry(
+            "work/jira",
+            &Entry::from_bytes(work_content.to_vec()),
+            &backend,
+        )
         .unwrap();
     let root_bytes_before = fs::read(store_dir.join("rootentry.age")).unwrap();
 
@@ -263,7 +278,10 @@ fn pass_move_same_keys_is_plain_rename() {
     store.move_entry("old", "sub/new", &backend).unwrap();
     assert!(!store_dir.join("old.gpg").exists());
     // Same resolved key set: ciphertext must be byte-identical (no re-encrypt).
-    assert_eq!(fs::read(store_dir.join("sub/new.gpg")).unwrap(), bytes_before);
+    assert_eq!(
+        fs::read(store_dir.join("sub/new.gpg")).unwrap(),
+        bytes_before
+    );
     assert_eq!(pass_show(&store_dir, &home, "sub/new"), b"pw\n");
 }
 
@@ -276,7 +294,11 @@ fn pass_move_different_keys_reencrypts() {
     let fpr_a = fs::read_to_string(fixtures_root().join("keys/gpg-key-a.fpr")).unwrap();
     let fpr_b = fs::read_to_string(fixtures_root().join("keys/gpg-key-b.fpr")).unwrap();
     fs::write(store_dir.join(".gpg-id"), format!("{}\n", fpr_a.trim())).unwrap();
-    fs::write(store_dir.join("bkeyed/.gpg-id"), format!("{}\n", fpr_b.trim())).unwrap();
+    fs::write(
+        store_dir.join("bkeyed/.gpg-id"),
+        format!("{}\n", fpr_b.trim()),
+    )
+    .unwrap();
 
     let store = Store::open(&store_dir, StoreFormat::Pass).unwrap();
     let backend = GpgCliBackend {
@@ -305,7 +327,11 @@ fn remove_prunes_empty_parents_but_not_keyed_dirs() {
         recipients_file: None,
     };
     store
-        .write_entry("a/b/c/entry", &Entry::from_bytes(b"pw\n".to_vec()), &backend)
+        .write_entry(
+            "a/b/c/entry",
+            &Entry::from_bytes(b"pw\n".to_vec()),
+            &backend,
+        )
         .unwrap();
     store.remove_entry("a/b/c/entry").unwrap();
     assert!(!store_dir.join("a").exists(), "empty parents pruned");
@@ -316,7 +342,11 @@ fn remove_prunes_empty_parents_but_not_keyed_dirs() {
     let pub_a = fs::read_to_string(fixtures_root().join("keys/age-key-a.pub")).unwrap();
     fs::write(store_dir.join("keyed/.age-recipients"), pub_a).unwrap();
     store
-        .write_entry("keyed/entry", &Entry::from_bytes(b"pw\n".to_vec()), &backend)
+        .write_entry(
+            "keyed/entry",
+            &Entry::from_bytes(b"pw\n".to_vec()),
+            &backend,
+        )
         .unwrap();
     store.remove_entry("keyed/entry").unwrap();
     assert!(store_dir.join("keyed/.age-recipients").is_file());

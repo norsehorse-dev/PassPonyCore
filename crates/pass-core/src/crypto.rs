@@ -32,11 +32,7 @@ pub type Recipient = String;
 /// interface on mobile, implemented directly in Rust on desktop.
 pub trait CryptoBackend: Send + Sync {
     /// Encrypt plaintext to the resolved recipient set.
-    fn encrypt(
-        &self,
-        plaintext: &[u8],
-        recipients: &[Recipient],
-    ) -> Result<Vec<u8>, CryptoError>;
+    fn encrypt(&self, plaintext: &[u8], recipients: &[Recipient]) -> Result<Vec<u8>, CryptoError>;
 
     /// Decrypt ciphertext with whatever identities/keys the backend holds.
     /// The backend owns passphrase prompting and caching policy.
@@ -49,11 +45,7 @@ pub trait CryptoBackend: Send + Sync {
 pub struct StubCryptoBackend;
 
 impl CryptoBackend for StubCryptoBackend {
-    fn encrypt(
-        &self,
-        plaintext: &[u8],
-        _recipients: &[Recipient],
-    ) -> Result<Vec<u8>, CryptoError> {
+    fn encrypt(&self, plaintext: &[u8], _recipients: &[Recipient]) -> Result<Vec<u8>, CryptoError> {
         Ok(plaintext.iter().map(|b| !b).collect())
     }
 

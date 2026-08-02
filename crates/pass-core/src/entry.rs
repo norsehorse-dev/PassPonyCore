@@ -119,8 +119,11 @@ impl Entry {
                                 // Preserve the key text and the colon exactly;
                                 // keep one space unless the old value had none.
                                 let colon = offset + k.len(); // index of ':'
-                                let value_start =
-                                    if v.starts_with(' ') { colon + 2 } else { colon + 1 };
+                                let value_start = if v.starts_with(' ') {
+                                    colon + 2
+                                } else {
+                                    colon + 1
+                                };
                                 let mut new_raw =
                                     Vec::with_capacity(raw_len - (end - value_start) + value.len());
                                 new_raw.extend_from_slice(&self.raw[..value_start]);

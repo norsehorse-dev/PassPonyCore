@@ -72,10 +72,7 @@ pub enum StoreError {
 /// `check_sneaky_paths` (which blocks only `..` — leading dots and `.`
 /// components are allowed, and that leniency is part of the compat surface).
 pub fn is_sneaky_path(path: &str) -> bool {
-    path == ".."
-        || path.starts_with("../")
-        || path.ends_with("/..")
-        || path.contains("/../")
+    path == ".." || path.starts_with("../") || path.ends_with("/..") || path.contains("/../")
 }
 
 /// An entry in the index: relative name without extension, `/`-separated.
@@ -281,11 +278,7 @@ impl Store {
 
     /// Decrypt an entry through the backend. File beats directory, as in the
     /// CLIs: `show foo` finds `foo.gpg` even when directory `foo/` exists.
-    pub fn read_entry(
-        &self,
-        name: &str,
-        backend: &dyn CryptoBackend,
-    ) -> Result<Entry, StoreError> {
+    pub fn read_entry(&self, name: &str, backend: &dyn CryptoBackend) -> Result<Entry, StoreError> {
         let file = self.entry_file(name)?;
         if !file.is_file() {
             return Err(StoreError::NotInStore);
@@ -562,7 +555,10 @@ mod tests {
         assert_eq!(StoreFormat::Pass.entry_extension(), "gpg");
         assert_eq!(StoreFormat::Passage.entry_extension(), "age");
         assert_eq!(StoreFormat::Pass.recipients_file_name(), ".gpg-id");
-        assert_eq!(StoreFormat::Passage.recipients_file_name(), ".age-recipients");
+        assert_eq!(
+            StoreFormat::Passage.recipients_file_name(),
+            ".age-recipients"
+        );
     }
 
     #[test]
@@ -580,8 +576,11 @@ mod tests {
         let dir = std::env::temp_dir().join("passpony-gpgid-test");
         std::fs::create_dir_all(&dir).unwrap();
         let f = dir.join(".gpg-id");
-        std::fs::write(&f, "AAAA # kevin\n# full comment line\n\nBBBB\nDROPPED-NO-NEWLINE")
-            .unwrap();
+        std::fs::write(
+            &f,
+            "AAAA # kevin\n# full comment line\n\nBBBB\nDROPPED-NO-NEWLINE",
+        )
+        .unwrap();
         let ids = parse_gpg_id_file(&f).unwrap();
         assert_eq!(ids, vec!["AAAA".to_string(), "BBBB".to_string()]);
     }

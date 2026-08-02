@@ -22,7 +22,9 @@ fn fixtures_root() -> PathBuf {
 fn store_dirs(format_dir: &str) -> Vec<PathBuf> {
     let root = fixtures_root().join(format_dir);
     let mut out: Vec<PathBuf> = fs::read_dir(&root)
-        .unwrap_or_else(|_| panic!("fixture corpus missing at {root:?}; run fixtures/gen-fixtures.sh"))
+        .unwrap_or_else(|_| {
+            panic!("fixture corpus missing at {root:?}; run fixtures/gen-fixtures.sh")
+        })
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| p.join("store").is_dir() && p.join("goldens").is_dir())
@@ -156,7 +158,11 @@ fn recipient_resolution_semantics() {
 
     // passage nested: work/deep/sub inherits work/.age-recipients (nearest
     // ancestor), root entries use the root file.
-    let store = Store::open(fx.join("passage/recipients-nested/store"), StoreFormat::Passage).unwrap();
+    let store = Store::open(
+        fx.join("passage/recipients-nested/store"),
+        StoreFormat::Passage,
+    )
+    .unwrap();
     match store.resolve_recipients("work/deep/sub/vault").unwrap() {
         RecipientSource::RecipientsFile(p) => {
             assert!(p.ends_with("work/.age-recipients"), "got {p:?}")

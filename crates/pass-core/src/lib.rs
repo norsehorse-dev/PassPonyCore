@@ -10,6 +10,7 @@
 
 pub mod crypto;
 pub mod entry;
+pub mod git;
 pub mod store;
 pub mod totp;
 

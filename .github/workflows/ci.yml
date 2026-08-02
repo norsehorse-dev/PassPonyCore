@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Build, fixtures, parity + round-trip + git matrix
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install reference CLIs
+        run: sudo apt-get update && sudo apt-get install -y pass age tree expect
+
+      - name: Rust toolchain (pinned by rust-toolchain.toml)
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Regenerate fixture corpus from the real CLIs
+        run: bash fixtures/gen-fixtures.sh
+
+      - name: Corpus drift check
+        # Keys are committed, so regeneration must not change goldens.
+        # Ciphertexts legitimately differ (age/gpg are randomized); goldens
+        # (plaintext outputs, exit codes, listings) must not.
+        run: |
+          git diff --exit-code -- 'fixtures/**/goldens' 'fixtures/keys' || {
+            echo '::error::fixture goldens drifted from committed corpus'; exit 1; }
+
+      - name: Build
+        run: cargo build --locked --all-targets
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Format
+        run: cargo fmt --check
+
+  git-server-matrix:
+    name: Git matrix vs ${{ matrix.server.name }}
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        server:
+          # TODO(P2 continuation): ssh-bare leg (OpenSSH container + bare
+          # repo) joins this matrix when the SSH credentials callback and
+          # TOFU known_hosts handling land in the engine. Tracked in
+          # docs/conflict-ux.md test-coverage map.
+          - name: forgejo
+            setup: |
+              docker run -d --name forgejo -p 3000:3000 -p 2223:22 \
+                -e FORGEJO__security__INSTALL_LOCK=true \
+                codeberg.org/forgejo/forgejo:9
+              sleep 15
+              docker exec forgejo forgejo admin user create \
+                --username ci --password ci-password-1 --email ci@passpony.test --admin
+              curl -sf -X POST -u ci:ci-password-1 \
+                -H 'Content-Type: application/json' \
+                -d '{"name":"store","auto_init":false,"default_branch":"main"}' \
+                http://localhost:3000/api/v1/user/repos
+            url: http://ci:ci-password-1@localhost:3000/ci/store.git
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install age
+        run: sudo apt-get update && sudo apt-get install -y age
+      - name: Start server
+        run: ${{ matrix.server.setup }}
+      - name: Run remote matrix
+        env:
+          PASSPONY_REMOTE_URL: ${{ matrix.server.url }}
+          # Remote-matrix tests are gated behind this env var; without it the
+          # git tests run against local bare repos only.
+        run: cargo test --locked -p pass-devtools --test git_matrix
