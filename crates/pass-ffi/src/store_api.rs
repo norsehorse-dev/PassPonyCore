@@ -365,6 +365,19 @@ impl GitSync {
         self.inner.lock().unwrap().push()?;
         Ok(())
     }
+
+    /// Create or repoint the `origin` remote — the publish-existing-store
+    /// flow is init → set_remote → push.
+    pub fn set_remote(&self, url: String) -> Result<(), GitError> {
+        self.inner.lock().unwrap().set_remote(&url)?;
+        Ok(())
+    }
+
+    /// The `origin` remote's URL, if configured. May contain embedded
+    /// credentials — redact userinfo before displaying.
+    pub fn remote_url(&self) -> Option<String> {
+        self.inner.lock().unwrap().remote_url()
+    }
 }
 
 /// CLI-style commit messages so PassPony stores read naturally in `git log`.

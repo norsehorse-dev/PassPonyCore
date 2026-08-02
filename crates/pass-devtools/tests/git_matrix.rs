@@ -324,6 +324,27 @@ fn push_rejected_when_stale_maps_to_non_fast_forward() {
 }
 
 #[test]
+fn set_remote_enables_publish_flow() {
+    let dir = scratch("publish");
+    let remote = dir.join("remote.git");
+    Repositoryish::init_bare(&remote);
+    let store_dir = dir.join("local");
+    fs::create_dir_all(&store_dir).unwrap();
+    fs::write(store_dir.join("entry.age"), b"ciphertext").unwrap();
+
+    GitStore::init(&store_dir, StoreFormat::Passage).unwrap();
+    git_config_identity(&store_dir);
+    let git = GitStore::open(&store_dir).unwrap();
+    assert!(!git.status().unwrap().has_remote);
+    git.set_remote(remote.to_str().unwrap()).unwrap();
+    assert!(git.status().unwrap().has_remote);
+    git.push().unwrap();
+    assert_eq!(git.status().unwrap().ahead, 0);
+    // Repointing works too.
+    git.set_remote(remote.to_str().unwrap()).unwrap();
+}
+
+#[test]
 fn status_counts_unpushed_commits_for_badge() {
     let (_dir, phone, _laptop) = setup("badge");
     let st = phone.git.status().unwrap();
