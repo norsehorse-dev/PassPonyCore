@@ -113,6 +113,54 @@ pub enum RecipientSource {
     Uninitialized,
 }
 
+impl RecipientSource {
+    /// The recipient strings to hand a backend's `encrypt`. `Some(vec![])`
+    /// means "no explicit recipients — encrypt to your own identities"
+    /// (passage's identities-fallback branch); `None` means encryption is
+    /// impossible (pass without any `.gpg-id`).
+    ///
+    /// For `.age-recipients` files this parses the way age itself reads
+    /// `-R` files: one recipient per line, blank lines and `#` comments
+    /// skipped.
+    pub fn encryption_recipients(&self) -> Result<Option<Vec<String>>, StoreError> {
+        Ok(match self {
+            RecipientSource::Ids(ids) => Some(ids.clone()),
+            RecipientSource::RecipientsFile(path) => {
+                let raw = fs::read_to_string(path)?;
+                Some(
+                    raw.lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                        .map(str::to_owned)
+                        .collect(),
+                )
+            }
+            RecipientSource::IdentitiesFallback => Some(Vec::new()),
+            RecipientSource::Uninitialized => None,
+        })
+    }
+}
+
+/// Write `data` to `path` atomically: temp file in the same directory, then
+/// rename over the target. Decrypted content never hits this path — only
+/// ciphertext does.
+fn atomic_write(path: &Path, data: &[u8]) -> Result<(), StoreError> {
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let tmp = dir.join(format!(
+        ".passpony-tmp-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    fs::write(&tmp, data)?;
+    match fs::rename(&tmp, path) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(e.into())
+        }
+    }
+}
+
 pub struct Store {
     root: PathBuf,
     format: StoreFormat,
@@ -245,6 +293,151 @@ impl Store {
         let ciphertext = fs::read(&file)?;
         let plaintext = backend.decrypt(&ciphertext)?;
         Ok(Entry::from_bytes(plaintext.to_vec()))
+    }
+
+    /// Encrypt `entry` to the recipients resolved for `name` and write it
+    /// atomically (temp file in the same directory, then rename), creating
+    /// parent directories as needed. Mirrors `pass insert` / `passage insert`.
+    pub fn write_entry(
+        &self,
+        name: &str,
+        entry: &Entry,
+        backend: &dyn CryptoBackend,
+    ) -> Result<(), StoreError> {
+        let recipients = self
+            .resolve_recipients(name)?
+            .encryption_recipients()?
+            .ok_or(crate::crypto::CryptoError::NoUsableKey)?;
+        let ciphertext = backend.encrypt(entry.to_bytes(), &recipients)?;
+        let file = self.entry_file(name)?;
+        if let Some(parent) = file.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        atomic_write(&file, &ciphertext)
+    }
+
+    /// Remove an entry and prune newly-empty parent directories up to the
+    /// store root (the CLIs run `rmdir -p`). Recipients files keep a
+    /// directory alive, matching the CLIs.
+    pub fn remove_entry(&self, name: &str) -> Result<(), StoreError> {
+        let file = self.entry_file(name)?;
+        if !file.is_file() {
+            return Err(StoreError::NotInStore);
+        }
+        fs::remove_file(&file)?;
+        let mut dir = file.parent().map(Path::to_path_buf);
+        while let Some(d) = dir {
+            if d == self.root || !d.starts_with(&self.root) {
+                break;
+            }
+            if fs::remove_dir(&d).is_err() {
+                break; // not empty (or gone) — stop pruning
+            }
+            dir = d.parent().map(Path::to_path_buf);
+        }
+        Ok(())
+    }
+
+    /// Move an entry. passage semantics: the destination is always
+    /// re-encrypted. pass semantics: re-encrypt only when the resolved
+    /// recipient set differs between source and destination (otherwise a
+    /// plain rename, ciphertext bytes untouched).
+    pub fn move_entry(
+        &self,
+        from: &str,
+        to: &str,
+        backend: &dyn CryptoBackend,
+    ) -> Result<(), StoreError> {
+        self.transfer_entry(from, to, backend, true)
+    }
+
+    /// Copy an entry; re-encryption rules as in [`Store::move_entry`].
+    pub fn copy_entry(
+        &self,
+        from: &str,
+        to: &str,
+        backend: &dyn CryptoBackend,
+    ) -> Result<(), StoreError> {
+        self.transfer_entry(from, to, backend, false)
+    }
+
+    fn transfer_entry(
+        &self,
+        from: &str,
+        to: &str,
+        backend: &dyn CryptoBackend,
+        remove_source: bool,
+    ) -> Result<(), StoreError> {
+        let src = self.entry_file(from)?;
+        if !src.is_file() {
+            return Err(StoreError::NotInStore);
+        }
+        let dst = self.entry_file(to)?;
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let must_reencrypt = match self.format {
+            StoreFormat::Passage => true,
+            StoreFormat::Pass => self.resolve_recipients(from)? != self.resolve_recipients(to)?,
+        };
+        if must_reencrypt {
+            let plaintext = backend.decrypt(&fs::read(&src)?)?;
+            let recipients = self
+                .resolve_recipients(to)?
+                .encryption_recipients()?
+                .ok_or(crate::crypto::CryptoError::NoUsableKey)?;
+            let ciphertext = backend.encrypt(&plaintext, &recipients)?;
+            atomic_write(&dst, &ciphertext)?;
+        } else {
+            fs::copy(&src, &dst)?;
+        }
+        if remove_source {
+            self.remove_entry(from)?;
+        }
+        Ok(())
+    }
+
+    /// Entries that a re-encrypt of `subpath` ("" for the whole store) would
+    /// rewrite — the preview the UX shows before mirroring `pass init -p` /
+    /// `passage reencrypt -p`.
+    pub fn reencrypt_targets(&self, subpath: &str) -> Result<Vec<String>, StoreError> {
+        if is_sneaky_path(subpath) {
+            return Err(StoreError::SneakyPath);
+        }
+        let prefix = if subpath.is_empty() {
+            String::new()
+        } else {
+            format!("{}/", subpath.trim_end_matches('/'))
+        };
+        Ok(self
+            .entries()?
+            .into_iter()
+            .map(|e| e.name)
+            .filter(|n| prefix.is_empty() || n.starts_with(&prefix))
+            .collect())
+    }
+
+    /// Decrypt and re-encrypt every entry under `subpath` to its currently
+    /// resolved recipient set. Unconditional, like passage (pass skips
+    /// entries whose key set is already current; rewriting them anyway is
+    /// compatible — the CLIs read the result either way).
+    pub fn reencrypt_subtree(
+        &self,
+        subpath: &str,
+        backend: &dyn CryptoBackend,
+    ) -> Result<Vec<String>, StoreError> {
+        let targets = self.reencrypt_targets(subpath)?;
+        for name in &targets {
+            let file = self.entry_file(name)?;
+            let plaintext = backend.decrypt(&fs::read(&file)?)?;
+            let recipients = self
+                .resolve_recipients(name)?
+                .encryption_recipients()?
+                .ok_or(crate::crypto::CryptoError::NoUsableKey)?;
+            let ciphertext = backend.encrypt(&plaintext, &recipients)?;
+            atomic_write(&file, &ciphertext)?;
+        }
+        Ok(targets)
     }
 
     /// Resolve the recipient source for (the directory containing) `name`,

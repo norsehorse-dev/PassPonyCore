@@ -9,3 +9,6 @@ description = "Store model, entry codec, and sync engine for pass/passage stores
 [dependencies]
 thiserror.workspace = true
 zeroize = { version = "1", features = ["derive"] }
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"

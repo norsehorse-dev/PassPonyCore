@@ -11,6 +11,7 @@
 pub mod crypto;
 pub mod entry;
 pub mod store;
+pub mod totp;
 
 /// Version of the core library, surfaced through FFI for diagnostics.
 pub fn core_version() -> String {
