@@ -1,0 +1,25 @@
+[package]
+name = "pass-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "UniFFI bindings over pass-core for Kotlin and Swift."
+
+[lib]
+name = "pass_ffi"
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+pass-core = { path = "../pass-core" }
+thiserror.workspace = true
+uniffi.workspace = true
+zeroize = "1"
+
+[features]
+cli = ["uniffi/cli"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "uniffi-bindgen.rs"
+required-features = ["cli"]

@@ -1,0 +1,11 @@
+[package]
+name = "pass-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Store model, entry codec, and sync engine for pass/passage stores. Crypto-free by design."
+
+[dependencies]
+thiserror.workspace = true
+zeroize = { version = "1", features = ["derive"] }
