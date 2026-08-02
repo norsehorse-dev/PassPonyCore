@@ -56,6 +56,13 @@ Numbered flow, tap-to-fill:
 
 ## Open items for the P3 week-one on-device spike
 
+**Status (2026-08-02):** the spike checks ship inside the autofill extension
+("Spike" screen in the picker). Item 1 is **deferred to the tester pool** —
+no USB-capable iPhone/YubiKey combination in-house; the KDF YubiKey tester
+runs the checks from the first TestFlight build and reports a screenshot.
+This defers an *optimization*, not a dependency: the cached-vault-key
+fallback below is the design of record and works either way.
+
 1. **USB-C YubiKey inside the AutoFill extension (the big one):** on an iPhone 15+/17, from a minimal `ASCredentialProviderViewController`, (a) enumerate `TKSmartCardSlotManager.default?.slotNames` with a USB-C YubiKey inserted; (b) try yubikit-swift `USBSmartCardConnection` + a raw SELECT of the OpenPGP AID; (c) with a PIV-provisioned key, try `SecItemCopyMatching(kSecAttrAccessGroupToken)` + `SecKeyCreateDecryptedData` from the extension process (needs `com.apple.security.smartcard` + `com.apple.token` keychain group — confirm those entitlements are grantable on an extension target, and note they require a paid/org team, not a Personal Team).
 2. **Confirm NFC entitlement behavior in current Xcode:** verify `com.apple.developer.nfc.readersession.formats` still cannot be attached to the extension target / that `NFCTagReaderSession.readingAvailable` is false in-extension on current iOS (expected: yes, still blocked — but the memo's verdict rests on this, so burn 30 minutes confirming).
 3. **`extensionContext.open(_:)` from the credential provider:** confirm it no-ops on current iOS (decides whether the "open PassPony" button can deep-link or must be instructions + notification).
