@@ -10,6 +10,9 @@
 
 use std::sync::Arc;
 
+mod store_api;
+pub use store_api::*;
+
 uniffi::setup_scaffolding!();
 
 /// FFI-facing crypto error. Mirrors `pass_core::crypto::CryptoError`; variants
@@ -44,17 +47,13 @@ impl From<pass_core::crypto::CryptoError> for CryptoError {
 /// Platform-native crypto engine, implemented in Kotlin/Swift and passed in.
 #[uniffi::export(with_foreign)]
 pub trait CryptoBackend: Send + Sync {
-    fn encrypt(
-        &self,
-        plaintext: Vec<u8>,
-        recipients: Vec<String>,
-    ) -> Result<Vec<u8>, CryptoError>;
+    fn encrypt(&self, plaintext: Vec<u8>, recipients: Vec<String>) -> Result<Vec<u8>, CryptoError>;
     fn decrypt(&self, ciphertext: Vec<u8>) -> Result<Vec<u8>, CryptoError>;
 }
 
 /// Adapts a foreign-implemented backend to pass-core's trait so core code
 /// stays FFI-unaware.
-struct ForeignBackendAdapter(Arc<dyn CryptoBackend>);
+pub(crate) struct ForeignBackendAdapter(pub(crate) Arc<dyn CryptoBackend>);
 
 impl pass_core::crypto::CryptoBackend for ForeignBackendAdapter {
     fn encrypt(
