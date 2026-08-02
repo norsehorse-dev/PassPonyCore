@@ -1,0 +1,16 @@
+[package]
+name = "pass-devtools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Development and CI tooling: CLI-shellout crypto backends, dump binary, parity suite. Never shipped in apps."
+publish = false
+
+[dependencies]
+pass-core = { path = "../pass-core" }
+zeroize = "1"
+
+[[bin]]
+name = "passpony-dump"
+path = "src/bin/passpony-dump.rs"

@@ -1,0 +1,7 @@
+Password Store
+|-- rootentry
+`-- work
+    |-- deep
+    |   `-- sub
+    |       `-- vault
+    `-- jira

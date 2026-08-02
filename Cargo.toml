@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/pass-core", "crates/pass-ffi"]
+members = ["crates/pass-core", "crates/pass-ffi", "crates/pass-devtools"]
 resolver = "2"
 
 [workspace.package]

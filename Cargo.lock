@@ -316,6 +316,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pass-devtools"
+version = "0.1.0"
+dependencies = [
+ "pass-core",
+ "zeroize",
+]
+
+[[package]]
 name = "pass-ffi"
 version = "0.1.0"
 dependencies = [

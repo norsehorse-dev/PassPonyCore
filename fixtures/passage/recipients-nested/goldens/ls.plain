@@ -1,0 +1,7 @@
+Passage
+|-- rootentry
+`-- work
+    |-- deep
+    |   `-- sub
+    |       `-- vault
+    `-- jira
