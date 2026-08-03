@@ -1,8 +1,8 @@
 Passage
-├── [01;34mcafé[0m
-│   └── [00mnaïve[0m
-├── [01;34mtotp[0m
-│   └── [00mgh[0m
-├── [01;34mweb sites[0m
-│   └── [00mmy bank[0m
-└── [00mweird.age[0m
+├── café
+│   └── naïve
+├── totp
+│   └── gh
+├── web sites
+│   └── my bank
+└── weird.age

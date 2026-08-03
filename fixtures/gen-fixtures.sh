@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Fixture corpus generator. The real CLIs are the spec: everything under
 # fixtures/{pass,passage}/ is produced by pass(1) and passage at the pinned
-# commit below, and the goldens/ trees capture their exact stdout, stderr,
-# and exit codes. Regenerate with: bash fixtures/gen-fixtures.sh
+# commit below, and the goldens/ trees capture their stdout (canonicalized:
+# ANSI stripped, NBSP normalized), stderr, and exit codes. Regenerate with: bash fixtures/gen-fixtures.sh
 #
 # Requirements: pass (1.7.x), age, age-keygen, gpg (2.x), tree, git.
 # The passage script is fetched at the pinned commit into fixtures/.tools/
@@ -44,18 +44,16 @@ golden() {
   local dir="$1" name="$2"; shift 2
   mkdir -p "$dir"
   local rc=0
-  "$@" >"$dir/$name.out" 2>"$dir/$name.err" || rc=$?
+  "$@" >"$dir/$name.raw" 2>"$dir/$name.err" || rc=$?
   echo "$rc" >"$dir/$name.rc"
-  case "$name" in
-    ls*)
-      # tree versions disagree on whether the continuation indent uses
-      # non-breaking spaces (introduced in tree 2.x, later walked back).
-      # Canonicalize to regular spaces so the corpus is byte-identical
-      # no matter which tree generated it.
-      LC_ALL=C sed -i.bak $'s/\xc2\xa0/ /g' "$dir/$name.out" && rm -f "$dir/$name.out.bak"
-      ;;
-  esac
-  strip_ansi <"$dir/$name.out" >"$dir/$name.plain"
+  # Canonicalize every capture: strip ANSI color and normalize
+  # non-breaking spaces to regular ones. tree's raw color codes and
+  # indent whitespace vary by version and platform, so committing raw
+  # bytes can never be reproducible across machines. The .plain twin
+  # stays for the test harness and is identical to .out.
+  strip_ansi <"$dir/$name.raw" | LC_ALL=C sed $'s/\xc2\xa0/ /g' >"$dir/$name.out"
+  rm -f "$dir/$name.raw"
+  cp "$dir/$name.out" "$dir/$name.plain"
 }
 
 # --- keys (generated once, then reused from fixtures/keys) -------------------
