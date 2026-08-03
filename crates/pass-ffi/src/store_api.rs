@@ -401,6 +401,11 @@ pub fn commit_message_rename(from: String, to: String) -> String {
     pass_core::git::messages::rename(&from, &to)
 }
 
+#[uniffi::export]
+pub fn commit_message_reencrypt(path: String) -> String {
+    pass_core::git::messages::reencrypt(&path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
