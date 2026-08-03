@@ -46,6 +46,15 @@ golden() {
   local rc=0
   "$@" >"$dir/$name.out" 2>"$dir/$name.err" || rc=$?
   echo "$rc" >"$dir/$name.rc"
+  case "$name" in
+    ls*)
+      # tree versions disagree on whether the continuation indent uses
+      # non-breaking spaces (introduced in tree 2.x, later walked back).
+      # Canonicalize to regular spaces so the corpus is byte-identical
+      # no matter which tree generated it.
+      LC_ALL=C sed -i.bak $'s/\xc2\xa0/ /g' "$dir/$name.out" && rm -f "$dir/$name.out.bak"
+      ;;
+  esac
   strip_ansi <"$dir/$name.out" >"$dir/$name.plain"
 }
 
