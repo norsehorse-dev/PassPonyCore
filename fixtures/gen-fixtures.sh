@@ -10,6 +10,14 @@
 
 set -euo pipefail
 
+# Force one locale so tree(1)'s line drawing is byte-identical on every
+# machine that regenerates the corpus. macOS has no C.UTF-8, so use
+# en_US.UTF-8, which both macOS and the Ubuntu CI runners ship.
+export LC_ALL=en_US.UTF-8
+# Belt and braces: tree honors TREE_CHARSET regardless of which locales
+# the machine has installed.
+export TREE_CHARSET=utf-8
+
 PASSAGE_COMMIT="4e4c5ae14be91833791d45608f50868175c1490f"
 FIX="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOLS="$FIX/.tools"

@@ -1,8 +1,8 @@
 Passage
-|-- café
-|   `-- naïve
-|-- totp
-|   `-- gh
-|-- web sites
-|   `-- my bank
-`-- weird.age
+├── café
+│   └── naïve
+├── totp
+│   └── gh
+├── web sites
+│   └── my bank
+└── weird.age

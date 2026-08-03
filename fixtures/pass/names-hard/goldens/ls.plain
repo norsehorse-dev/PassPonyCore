@@ -1,6 +1,6 @@
 Password Store
-|-- café
-|   `-- naïve
-|-- web sites
-|   `-- my bank
-`-- weird.gpg
+├── café
+│   └── naïve
+├── web sites
+│   └── my bank
+└── weird.gpg

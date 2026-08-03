@@ -1,4 +1,4 @@
 Password Store
-|-- [01;34mweb[0m
-|   `-- [00msite[0m
-`-- [00mweb[0m
+├── [01;34mweb[0m
+│   └── [00msite[0m
+└── [00mweb[0m

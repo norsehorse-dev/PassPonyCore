@@ -1,4 +1,4 @@
 Passage
-|-- alpha
-`-- web
-    `-- github
+├── alpha
+└── web
+    └── github

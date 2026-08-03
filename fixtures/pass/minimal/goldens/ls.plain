@@ -1,4 +1,4 @@
 Password Store
-|-- alpha
-|-- beta
-`-- gamma
+├── alpha
+├── beta
+└── gamma

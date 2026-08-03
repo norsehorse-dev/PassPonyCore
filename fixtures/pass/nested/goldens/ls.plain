@@ -1,7 +1,7 @@
 Password Store
-|-- rootentry
-`-- work
-    |-- deep
-    |   `-- sub
-    |       `-- vault
-    `-- jira
+├── rootentry
+└── work
+    ├── deep
+    │   └── sub
+    │       └── vault
+    └── jira

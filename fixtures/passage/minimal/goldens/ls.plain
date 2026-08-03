@@ -1,4 +1,4 @@
 Passage
-|-- alpha
-|-- beta
-`-- gamma
+├── alpha
+├── beta
+└── gamma
