@@ -523,10 +523,14 @@ fn render_node(node: &DirNode, indent: &str, out: &mut String) {
     });
     let last = items.len().saturating_sub(1);
     for (i, item) in items.iter().enumerate() {
+        // Byte-faithful to tree(1) in UTF-8 mode, which the ls goldens
+        // are captured from: the continuation indent is a box-drawing
+        // pipe followed by two non-breaking spaces and one regular
+        // space. Regular spaces would render the same and fail parity.
         let (connector, child_indent) = if i == last {
-            ("`-- ", format!("{indent}    "))
+            ("\u{2514}\u{2500}\u{2500} ", format!("{indent}    "))
         } else {
-            ("|-- ", format!("{indent}|   "))
+            ("\u{251c}\u{2500}\u{2500} ", format!("{indent}\u{2502}\u{a0}\u{a0} "))
         };
         match item {
             Item::Entry(name) => {
