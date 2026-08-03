@@ -31,7 +31,7 @@ jobs:
         # Ciphertexts legitimately differ (age/gpg are randomized); goldens
         # (plaintext outputs, exit codes, listings) must not.
         run: |
-          git diff --exit-code -- 'fixtures/**/goldens' 'fixtures/keys' || {
+          git diff --exit-code -- ':(glob)fixtures/**/goldens/**' 'fixtures/keys' || {
             echo '::error::fixture goldens drifted from committed corpus'; exit 1; }
 
       - name: Build
@@ -64,7 +64,7 @@ jobs:
                 -e FORGEJO__security__INSTALL_LOCK=true \
                 codeberg.org/forgejo/forgejo:9
               sleep 15
-              docker exec forgejo forgejo admin user create \
+              docker exec -u git forgejo forgejo admin user create \
                 --username ci --password ci-password-1 --email ci@passpony.test --admin
               curl -sf -X POST -u ci:ci-password-1 \
                 -H 'Content-Type: application/json' \
