@@ -101,9 +101,17 @@ fn assert_show_parity(fixture: &Path, format: StoreFormat) {
 
 /// Import the committed fixture secret keys into a scratch GNUPGHOME once.
 fn test_gnupghome() -> PathBuf {
+    // Parallel test threads must not race this: gpg locks its keybox,
+    // so two concurrent imports into a fresh home fail one of them.
+    // Once serializes initialization within this binary; the marker
+    // file short-circuits later binaries and reruns.
+    static INIT: std::sync::Once = std::sync::Once::new();
     let home = std::env::temp_dir().join("passpony-parity-gnupghome");
-    let marker = home.join(".imported");
-    if !marker.exists() {
+    INIT.call_once(|| {
+        let marker = home.join(".imported");
+        if marker.exists() {
+            return;
+        }
         fs::create_dir_all(&home).unwrap();
         #[cfg(unix)]
         {
@@ -120,7 +128,7 @@ fn test_gnupghome() -> PathBuf {
             .expect("gpg not runnable");
         assert!(status.success(), "importing fixture gpg keys failed");
         fs::write(&marker, b"").unwrap();
-    }
+    });
     home
 }
 
