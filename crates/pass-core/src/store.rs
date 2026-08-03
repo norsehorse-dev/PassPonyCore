@@ -530,7 +530,10 @@ fn render_node(node: &DirNode, indent: &str, out: &mut String) {
         let (connector, child_indent) = if i == last {
             ("\u{2514}\u{2500}\u{2500} ", format!("{indent}    "))
         } else {
-            ("\u{251c}\u{2500}\u{2500} ", format!("{indent}\u{2502}\u{a0}\u{a0} "))
+            (
+                "\u{251c}\u{2500}\u{2500} ",
+                format!("{indent}\u{2502}\u{a0}\u{a0} "),
+            )
         };
         match item {
             Item::Entry(name) => {
