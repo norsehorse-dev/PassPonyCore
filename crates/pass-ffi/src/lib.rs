@@ -13,6 +13,15 @@ use std::sync::Arc;
 mod store_api;
 pub use store_api::*;
 
+// Android-only Rust age engine. Off by default (iOS's FFI surface is
+// unchanged unless this feature is explicitly enabled); see
+// docs/plan/P04-core-age-engine.md in PassPonyAndroid for why this lives
+// in Rust rather than as a platform engine, the way iOS does it.
+#[cfg(feature = "age-engine")]
+mod age_engine;
+#[cfg(feature = "age-engine")]
+pub use age_engine::*;
+
 uniffi::setup_scaffolding!();
 
 /// FFI-facing crypto error. Mirrors `pass_core::crypto::CryptoError`; variants
