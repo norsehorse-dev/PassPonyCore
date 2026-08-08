@@ -185,6 +185,15 @@ impl GitStore {
         let repo = git2::build::RepoBuilder::new()
             .fetch_options(fo)
             .clone(url, &dest)?;
+        // A cloned repo has no local identity until something sets one --
+        // a fresh device's very first commit (the first edit made after
+        // setting up from an existing remote) would otherwise fail with
+        // "signature not found". Same placeholder init() falls back to.
+        if repo.signature().is_err() {
+            let mut config = repo.config()?;
+            config.set_str("user.name", "PassPony")?;
+            config.set_str("user.email", "passpony@localhost")?;
+        }
         Ok(GitStore { repo, root: dest })
     }
 
