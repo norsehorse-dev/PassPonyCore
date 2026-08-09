@@ -7,6 +7,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Kept in sync with PassPonyAndroid's gradle.properties `ndkVersion` --
+  # see that repo's docs/REPRODUCIBLE.md. Only used by the android-check
+  # job below; nothing here needs it for the plain cargo build/test.
+  ANDROID_NDK_VERSION: "27.2.12479018"
 
 jobs:
   test:
@@ -40,11 +44,61 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      - name: Build pass-ffi with the age-engine feature
+        # age-engine is optional and off by default (iOS doesn't use it --
+        # see crates/pass-ffi/Cargo.toml) so the default `cargo build`
+        # above never exercises it. PassPonyAndroid's build always enables
+        # it, so it needs its own coverage here rather than relying on
+        # PassPonyAndroid's CI to be the first place a break surfaces.
+        run: cargo build --locked -p pass-ffi --features age-engine --all-targets
+
+      - name: Test pass-ffi with the age-engine feature
+        run: cargo test --locked -p pass-ffi --features age-engine
+
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
+      - name: Clippy (age-engine feature)
+        run: cargo clippy --locked -p pass-ffi --features age-engine --all-targets -- -D warnings
+
       - name: Format
         run: cargo fmt --check
+
+  android-check:
+    name: Android cross-compile check (pass-ffi, age-engine)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install perl and make
+        # Required by pass-core's vendored OpenSSL build for mobile
+        # targets (see PassPonyAndroid's scripts/build-core.sh, which
+        # documents the same requirement for its own cross-compile).
+        run: sudo apt-get update && sudo apt-get install -y perl make
+
+      - name: Add Android Rust targets
+        run: rustup target add aarch64-linux-android x86_64-linux-android
+
+      - name: Install cargo-ndk
+        run: cargo install cargo-ndk --locked
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install pinned NDK
+        run: sdkmanager --install "ndk;${{ env.ANDROID_NDK_VERSION }}"
+
+      - name: Cross-compile check pass-ffi for Android (age-engine)
+        # A real cross-compile rather than a plain `cargo check`: pass-core's
+        # vendored OpenSSL build script runs regardless of check vs. build,
+        # so there's no cheaper way to catch an Android-specific break here.
+        # This mirrors what PassPonyAndroid's own scripts/build-core.sh does,
+        # just for one ABI, so a break surfaces in this repo's own CI first.
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.ANDROID_NDK_VERSION }}
+        run: cargo ndk --platform 26 -t arm64-v8a build -p pass-ffi --features age-engine
 
   git-server-matrix:
     name: Git matrix vs ${{ matrix.server.name }}
