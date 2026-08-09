@@ -96,8 +96,8 @@ impl AgeEngine {
 
         let refs: Vec<&dyn age::Recipient> =
             targets.iter().map(|r| r as &dyn age::Recipient).collect();
-        let encryptor =
-            Encryptor::with_recipients(refs.into_iter()).map_err(|_| CryptoError::EncryptionFailed)?;
+        let encryptor = Encryptor::with_recipients(refs.into_iter())
+            .map_err(|_| CryptoError::EncryptionFailed)?;
 
         let mut ciphertext = Vec::with_capacity(plaintext.len());
         let mut writer = encryptor
@@ -118,8 +118,11 @@ impl AgeEngine {
 
         let decryptor =
             Decryptor::new(&ciphertext[..]).map_err(|_| CryptoError::DecryptionFailed)?;
-        let refs: Vec<&dyn age::Identity> =
-            self.identities.iter().map(|i| i as &dyn age::Identity).collect();
+        let refs: Vec<&dyn age::Identity> = self
+            .identities
+            .iter()
+            .map(|i| i as &dyn age::Identity)
+            .collect();
         let mut reader = decryptor
             .decrypt(refs.into_iter())
             .map_err(|_| CryptoError::DecryptionFailed)?;
@@ -145,7 +148,9 @@ mod tests {
         let ciphertext = engine
             .encrypt(plaintext.clone(), vec![generated.recipient_string.clone()])
             .expect("encrypt to explicit recipient");
-        let decrypted = engine.decrypt(ciphertext).expect("decrypt with own identity");
+        let decrypted = engine
+            .decrypt(ciphertext)
+            .expect("decrypt with own identity");
         assert_eq!(decrypted, plaintext);
     }
 
@@ -170,7 +175,9 @@ mod tests {
         let generated = age_generate_identity();
         let engine = AgeEngine::from_identities_text(generated.identity_string);
         let plaintext = b"self-encrypted\n".to_vec();
-        let ciphertext = engine.encrypt(plaintext.clone(), vec![]).expect("fallback encrypt");
+        let ciphertext = engine
+            .encrypt(plaintext.clone(), vec![])
+            .expect("fallback encrypt");
         let decrypted = engine.decrypt(ciphertext).expect("decrypt");
         assert_eq!(decrypted, plaintext);
     }
@@ -184,7 +191,10 @@ mod tests {
 
         let plaintext = b"shared entry\n".to_vec();
         let ciphertext = engine_a
-            .encrypt(plaintext.clone(), vec![a.recipient_string, b.recipient_string])
+            .encrypt(
+                plaintext.clone(),
+                vec![a.recipient_string, b.recipient_string],
+            )
             .expect("encrypt to two recipients");
 
         assert_eq!(engine_a.decrypt(ciphertext.clone()).unwrap(), plaintext);
@@ -235,8 +245,8 @@ mod tests {
     /// above only prove internal round-trip consistency.
     #[test]
     fn fixture_corpus_alpha_matches_golden() {
-        let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../fixtures/passage/minimal");
+        let fixtures =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/passage/minimal");
         let identities_text = std::fs::read_to_string(fixtures.join("identities"))
             .expect("fixtures/passage/minimal/identities present");
         let ciphertext = std::fs::read(fixtures.join("store/alpha.age"))
