@@ -1,0 +1,20 @@
+# Pinned so openssl-sys's vendored OpenSSL build (crates/pass-core/Cargo.toml,
+# mobile-only: cfg(any(target_os = "ios", target_os = "android"))) always
+# installs to the same absolute path regardless of where this repo is
+# checked out. openssl-src hardcodes OpenSSL's --prefix to a path under
+# OUT_DIR with no override (its Build struct only exposes openssl_dir(),
+# which sets --openssldir, not --prefix -- see docs.rs/openssl-src), and
+# OpenSSL's own build bakes that prefix into ENGINESDIR/MODULESDIR inside
+# the compiled libcrypto. Two checkouts of the identical commit at
+# different filesystem paths therefore produce byte-different .so files
+# even though the source and toolchain match exactly -- confirmed via
+# PassPonyAndroid's tools/verify_repro.sh rebuild gate, which clones this
+# repo into two different temp paths and diffs the result.
+#
+# Every consumer that needs a from-source rebuild to byte-match a
+# published release -- PassPonyAndroid's scripts/build-core.sh and
+# verify_repro.sh, and eventually F-Droid's buildserver -- has to build
+# against this same fixed path. See PassPonyAndroid's docs/REPRODUCIBLE.md
+# for the full incident writeup.
+[build]
+target-dir = "/tmp/passponycore-cargo-target"
