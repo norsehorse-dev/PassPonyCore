@@ -17,6 +17,8 @@ pub mod hotp;
 pub mod identities;
 pub mod migration;
 pub mod ssh;
+#[cfg(feature = "passkey")]
+pub mod passkey;
 pub mod store;
 pub mod totp;
 

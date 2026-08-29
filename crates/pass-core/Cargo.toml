@@ -23,6 +23,16 @@ getrandom = "0.4"
 # runs here (libssh2 signs), so the rsa feature stays off.
 ssh-key = { version = "0.6.7", default-features = false, features = ["std", "ecdsa", "ed25519", "encryption", "getrandom"] }
 
+# Passkey line format spike (passkey.rs, PassPonyAndroid P21): CXF passkey
+# objects as base64url JSON. Optional and off by default so the phone builds
+# carry none of it until the passkey release wires it up.
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+base64 = { version = "0.21", optional = true }
+
+[features]
+passkey = ["dep:serde", "dep:serde_json", "dep:base64"]
+
 # Mobile targets have no system OpenSSL to link against; build it from source
 # there. Desktop/CI keep linking the system library.
 [target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
