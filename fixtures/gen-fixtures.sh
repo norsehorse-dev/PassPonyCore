@@ -4,7 +4,8 @@
 # commit below, and the goldens/ trees capture their stdout (canonicalized:
 # ANSI stripped, NBSP normalized), stderr, and exit codes. Regenerate with: bash fixtures/gen-fixtures.sh
 #
-# Requirements: pass (1.7.x), age, age-keygen, gpg (2.x), tree, git.
+# Requirements: pass (1.7.x), pass-otp (the `pass otp` extension, with its
+# oathtool dependency), age, age-keygen, gpg (2.x), tree, git.
 # The passage script is fetched at the pinned commit into fixtures/.tools/
 # (gitignored) unless PASSAGE_SCRIPT points at an existing copy.
 
@@ -177,7 +178,7 @@ passage insert -m "web/site" <"$CONTENT/alpha" >/dev/null
 passage_goldens collision web web/site
 golden "$FIX/passage/collision/goldens" show-dir passage show web/
 
-# dotfiles: hidden entries — ls hides, show works
+# dotfiles: hidden entries; ls hides, show works
 passage_fixture dotfiles
 cp "$KEYS/age-key-a.txt" "$PASSAGE_IDENTITIES_FILE"
 passage insert -m .hidden <"$CONTENT/hidden" >/dev/null
@@ -269,6 +270,33 @@ pass insert -m "web sites/my bank" <"$CONTENT/alpha" >/dev/null
 pass insert -m "café/naïve" <"$CONTENT/unicode" >/dev/null
 pass insert -m "weird.gpg" <"$CONTENT/beta" >/dev/null
 pass_goldens names-hard "web sites/my bank" "café/naïve" weird.gpg
+
+# otp: what pass-otp itself writes, so the codec's otpauth operations are
+# held to the extension's bytes rather than to prose.
+#   base         a plain entry, the starting point for append
+#   appended     base + `pass otp append` (URI on its own line at the end)
+#   replaced     appended + `pass otp append` over the existing URI
+#   insert-only  `pass otp insert` on a new name: the URI is the whole entry,
+#                so it sits on line 1 where `pass otp code` still finds it
+# The otp-uri goldens capture `pass otp uri`, the extension's own view of
+# which line is the URI.
+OTP_URI_A='otpauth://totp/Example:kevin?secret=JBSWY3DPEHPK3PXP&issuer=Example'
+OTP_URI_B='otpauth://totp/Other:kevin?secret=MZXW6YTBOI&issuer=Other&digits=8'
+printf 'hunter2\nusername: kevin\nurl: example.com\n' >"$CONTENT/otp-base"
+pass_fixture otp
+pass init "$GPG_FPR_A" >/dev/null
+pass insert -m base <"$CONTENT/otp-base" >/dev/null
+pass insert -m appended <"$CONTENT/otp-base" >/dev/null
+echo "$OTP_URI_A" | pass otp append appended >/dev/null
+pass insert -m replaced <"$CONTENT/otp-base" >/dev/null
+echo "$OTP_URI_A" | pass otp append replaced >/dev/null
+echo "$OTP_URI_B" | pass otp append replaced >/dev/null
+echo "$OTP_URI_A" | pass otp insert insert-only >/dev/null
+pass_goldens otp base appended replaced insert-only
+for entry in appended replaced insert-only; do
+  golden "$FIX/pass/otp/goldens/otp-uri" "$entry" pass otp uri "$entry"
+done
+golden "$FIX/pass/otp/goldens/otp-uri" base pass otp uri base
 
 echo "Corpus generated under $FIX"
 find "$FIX/pass" "$FIX/passage" -name "*.gpg" -o -name "*.age" | wc -l

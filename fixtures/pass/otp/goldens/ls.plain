@@ -1,0 +1,5 @@
+Password Store
+├── appended
+├── base
+├── insert-only
+└── replaced

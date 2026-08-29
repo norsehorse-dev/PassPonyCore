@@ -20,7 +20,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install reference CLIs
-        run: sudo apt-get update && sudo apt-get install -y pass age tree expect
+        run: sudo apt-get update && sudo apt-get install -y pass pass-extension-otp oathtool age tree expect
 
       - name: Rust toolchain (pinned by rust-toolchain.toml)
         uses: dtolnay/rust-toolchain@stable

@@ -1,0 +1,4 @@
+hunter2
+username: kevin
+url: example.com
+otpauth://totp/Other:kevin?secret=MZXW6YTBOI&issuer=Other&digits=8

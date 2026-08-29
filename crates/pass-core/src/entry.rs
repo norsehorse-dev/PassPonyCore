@@ -23,20 +23,22 @@ pub struct Field<'a> {
     pub value: &'a str,
 }
 
+const OTPAUTH_PREFIX: &[u8] = b"otpauth://";
+
 impl Entry {
     pub fn from_bytes(raw: Vec<u8>) -> Self {
         Entry { raw }
     }
 
     /// Build a new entry from a password (no trailing newline is added when
-    /// `password` is the whole content — callers append fields as needed).
+    /// `password` is the whole content; callers append fields as needed).
     pub fn from_password(password: &[u8]) -> Self {
         let mut raw = password.to_vec();
         raw.push(b'\n');
         Entry { raw }
     }
 
-    /// Byte-identical serialization — the round-trip guarantee.
+    /// Byte-identical serialization: the round-trip guarantee.
     pub fn to_bytes(&self) -> &[u8] {
         &self.raw
     }
@@ -87,12 +89,68 @@ impl Entry {
         out
     }
 
-    /// First `otpauth://` line, if any (pass-otp semantics: the first wins).
+    /// First `otpauth://` line, if any, line 1 included. This is
+    /// `pass otp code`'s rule: it scans every line of the plaintext and the
+    /// first match wins, so an entry created by `pass otp insert` (whose only
+    /// content is the URI) resolves here exactly as it does there. A `\r`
+    /// left by a CRLF editor is not part of the URI and is dropped.
     pub fn otpauth(&self) -> Option<&str> {
-        self.lines()
-            .skip(1)
-            .filter_map(|l| std::str::from_utf8(l).ok())
-            .find(|l| l.starts_with("otpauth://"))
+        let (start, end) = self.otpauth_span()?;
+        std::str::from_utf8(&self.raw[start..end]).ok()
+    }
+
+    /// True when the password line itself is the `otpauth://` URI, which is
+    /// what `pass otp insert` writes for a brand-new entry. `password()` still
+    /// returns that line, because that is what `pass show` prints; callers
+    /// use this to decide how to present the entry.
+    pub fn is_otp_only(&self) -> bool {
+        self.raw.starts_with(OTPAUTH_PREFIX)
+    }
+
+    /// Set the entry's `otpauth://` URI. If a URI line exists (any line,
+    /// first match, line 1 included), only that line's text is replaced: its
+    /// line ending, `\r` included, is kept. If none exists, a missing final
+    /// newline is supplied (the same single byte `set_field` may add) and
+    /// `uri` is appended as its own line. This is `pass otp append` with
+    /// `--force`, except that pass-otp rewrites every URI line it finds and
+    /// this touches only the first.
+    pub fn set_otpauth(&mut self, uri: &str) {
+        if let Some((start, end)) = self.otpauth_span() {
+            let mut new_raw = Vec::with_capacity(self.raw.len() - (end - start) + uri.len());
+            new_raw.extend_from_slice(&self.raw[..start]);
+            new_raw.extend_from_slice(uri.as_bytes());
+            new_raw.extend_from_slice(&self.raw[end..]);
+            self.raw = new_raw;
+            return;
+        }
+        if !self.raw.is_empty() && !self.raw.ends_with(b"\n") {
+            self.raw.push(b'\n');
+        }
+        self.raw.extend_from_slice(uri.as_bytes());
+        self.raw.push(b'\n');
+    }
+
+    /// Remove the first `otpauth://` line together with its line ending.
+    /// Returns false and leaves the bytes untouched when there is no URI, or
+    /// when the URI is line 1: deleting the password line would promote the
+    /// next line to password, so an OTP-only entry is removed as a whole
+    /// (delete the entry), never edited into something else.
+    pub fn remove_otpauth(&mut self) -> bool {
+        let Some((start, text_end)) = self.otpauth_span() else {
+            return false;
+        };
+        if start == 0 {
+            return false;
+        }
+        let mut end = text_end;
+        if end < self.raw.len() && self.raw[end] == b'\r' {
+            end += 1;
+        }
+        if end < self.raw.len() && self.raw[end] == b'\n' {
+            end += 1;
+        }
+        self.raw.drain(start..end);
+        true
     }
 
     /// Set `key` to `value`: rewrites only the value bytes of the first
@@ -152,6 +210,29 @@ impl Entry {
         self.raw.push(b'\n');
     }
 
+    /// Byte range of the first `otpauth://` line's text: from the line start
+    /// up to, but not including, its `\n` and any `\r` right before it.
+    fn otpauth_span(&self) -> Option<(usize, usize)> {
+        let raw_len = self.raw.len();
+        let mut offset = 0usize;
+        loop {
+            let end = self.raw[offset..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map(|i| offset + i)
+                .unwrap_or(raw_len);
+            let line = &self.raw[offset..end];
+            if line.starts_with(OTPAUTH_PREFIX) {
+                let text_end = if line.ends_with(b"\r") { end - 1 } else { end };
+                return Some((offset, text_end));
+            }
+            if end == raw_len {
+                return None;
+            }
+            offset = end + 1;
+        }
+    }
+
     fn lines(&self) -> impl Iterator<Item = &[u8]> {
         self.raw.split(|&b| b == b'\n')
     }
@@ -160,6 +241,9 @@ impl Entry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const URI: &str = "otpauth://totp/Example:kevin?secret=JBSWY3DPEHPK3PXP&issuer=Example";
+    const URI2: &str = "otpauth://totp/Other:kevin?secret=NBSWY3DPO5XXE3DE&issuer=Other";
 
     #[test]
     fn round_trip_is_byte_identical() {
@@ -218,6 +302,109 @@ mod tests {
         assert_eq!(fields[1].key, "url");
         assert_eq!(fields[1].value, "example.com");
         assert_eq!(e.otpauth(), Some("otpauth://totp/x?secret=ABC"));
+        assert!(!e.is_otp_only());
+    }
+
+    #[test]
+    fn otpauth_on_line_one_is_the_pass_otp_insert_case() {
+        // `pass otp insert` writes the URI as the entry's only content.
+        let e = Entry::from_bytes(format!("{URI}\n").into_bytes());
+        assert_eq!(e.otpauth(), Some(URI));
+        assert!(e.is_otp_only());
+        assert_eq!(e.password(), URI.as_bytes());
+        assert!(e.fields().is_empty());
+        // First match wins, line 1 included, when a second URI follows.
+        let e = Entry::from_bytes(format!("{URI}\n{URI2}\n").into_bytes());
+        assert_eq!(e.otpauth(), Some(URI));
+    }
+
+    #[test]
+    fn otpauth_drops_a_trailing_cr() {
+        let e = Entry::from_bytes(format!("pw\r\n{URI}\r\nurl: x\r\n").into_bytes());
+        assert_eq!(e.otpauth(), Some(URI));
+    }
+
+    #[test]
+    fn otpauth_absent() {
+        assert_eq!(Entry::from_bytes(b"pw\nurl: x\n".to_vec()).otpauth(), None);
+        assert_eq!(Entry::from_bytes(b"".to_vec()).otpauth(), None);
+        assert!(!Entry::from_bytes(b"".to_vec()).is_otp_only());
+    }
+
+    #[test]
+    fn set_otpauth_replaces_only_the_uri_text() {
+        let mut e =
+            Entry::from_bytes(format!("pw\nusername: kevin\n{URI}\nnote: keep me\n").into_bytes());
+        e.set_otpauth(URI2);
+        assert_eq!(
+            e.to_bytes(),
+            format!("pw\nusername: kevin\n{URI2}\nnote: keep me\n").as_bytes()
+        );
+        // Line 1 (OTP-only entry) is replaced in place too.
+        let mut e = Entry::from_bytes(format!("{URI}\n").into_bytes());
+        e.set_otpauth(URI2);
+        assert_eq!(e.to_bytes(), format!("{URI2}\n").as_bytes());
+        // A CRLF line keeps its CRLF.
+        let mut e = Entry::from_bytes(format!("pw\r\n{URI}\r\nurl: x\r\n").into_bytes());
+        e.set_otpauth(URI2);
+        assert_eq!(
+            e.to_bytes(),
+            format!("pw\r\n{URI2}\r\nurl: x\r\n").as_bytes()
+        );
+        // Last line without a trailing newline stays without one.
+        let mut e = Entry::from_bytes(format!("pw\n{URI}").into_bytes());
+        e.set_otpauth(URI2);
+        assert_eq!(e.to_bytes(), format!("pw\n{URI2}").as_bytes());
+    }
+
+    #[test]
+    fn set_otpauth_appends_when_missing() {
+        let mut e = Entry::from_bytes(b"pw\nusername: kevin\n".to_vec());
+        e.set_otpauth(URI);
+        assert_eq!(
+            e.to_bytes(),
+            format!("pw\nusername: kevin\n{URI}\n").as_bytes()
+        );
+        // Missing trailing newline: prefix preserved exactly, one '\n' supplied.
+        let mut e = Entry::from_bytes(b"pw\nusername: kevin".to_vec());
+        e.set_otpauth(URI);
+        assert_eq!(
+            e.to_bytes(),
+            format!("pw\nusername: kevin\n{URI}\n").as_bytes()
+        );
+        // An empty entry becomes an OTP-only entry, as `pass otp insert` makes.
+        let mut e = Entry::from_bytes(Vec::new());
+        e.set_otpauth(URI);
+        assert_eq!(e.to_bytes(), format!("{URI}\n").as_bytes());
+        assert!(e.is_otp_only());
+    }
+
+    #[test]
+    fn remove_otpauth_takes_the_line_and_its_ending() {
+        let mut e =
+            Entry::from_bytes(format!("pw\nusername: kevin\n{URI}\nnote: keep me\n").into_bytes());
+        assert!(e.remove_otpauth());
+        assert_eq!(e.to_bytes(), b"pw\nusername: kevin\nnote: keep me\n");
+        // CRLF line: both bytes of the ending go with it.
+        let mut e = Entry::from_bytes(format!("pw\r\n{URI}\r\nurl: x\r\n").into_bytes());
+        assert!(e.remove_otpauth());
+        assert_eq!(e.to_bytes(), b"pw\r\nurl: x\r\n");
+        // Last line without a newline: the newline before it stays, as the
+        // terminator of the previous line.
+        let mut e = Entry::from_bytes(format!("pw\n{URI}").into_bytes());
+        assert!(e.remove_otpauth());
+        assert_eq!(e.to_bytes(), b"pw\n");
+    }
+
+    #[test]
+    fn remove_otpauth_refuses_line_one_and_absence() {
+        let original = format!("{URI}\nurl: x\n").into_bytes();
+        let mut e = Entry::from_bytes(original.clone());
+        assert!(!e.remove_otpauth());
+        assert_eq!(e.to_bytes(), original.as_slice());
+        let mut e = Entry::from_bytes(b"pw\nurl: x\n".to_vec());
+        assert!(!e.remove_otpauth());
+        assert_eq!(e.to_bytes(), b"pw\nurl: x\n");
     }
 
     #[test]
@@ -257,5 +444,20 @@ mod tests {
             e.to_bytes(),
             b"looks: like a field\nreal: field\nlooks: changed\n"
         );
+    }
+
+    #[test]
+    fn set_field_never_touches_the_otpauth_line() {
+        // A field edit next to a URI leaves the URI's bytes alone, and a key
+        // that happens to be `otpauth` is a field, not the URI.
+        let mut e = Entry::from_bytes(format!("pw\n{URI}\nurl: a\n").into_bytes());
+        e.set_field("url", "b");
+        assert_eq!(e.to_bytes(), format!("pw\n{URI}\nurl: b\n").as_bytes());
+        e.set_field("otpauth", "not a uri");
+        assert_eq!(
+            e.to_bytes(),
+            format!("pw\n{URI}\nurl: b\notpauth: not a uri\n").as_bytes()
+        );
+        assert_eq!(e.otpauth(), Some(URI));
     }
 }

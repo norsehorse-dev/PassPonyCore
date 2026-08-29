@@ -208,6 +208,87 @@ fn pass_reads_what_we_write() {
     }
 }
 
+/// Run a `pass otp` subcommand against a store and return stdout.
+fn pass_otp(store: &Path, gnupghome: &Path, args: &[&str]) -> String {
+    let out = Command::new("pass")
+        .arg("otp")
+        .args(args)
+        .env("PASSWORD_STORE_DIR", store)
+        .env("GNUPGHOME", gnupghome)
+        .output()
+        .expect("pass CLI not runnable");
+    assert!(
+        out.status.success(),
+        "pass otp {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap()
+}
+
+/// A code the app sets up must be the code pass-otp derives: `pass otp uri`
+/// sees the line we wrote, and `pass otp code` (oathtool underneath) agrees
+/// with `Totp::code_at` for the same window.
+#[test]
+fn pass_otp_reads_what_we_write() {
+    use pass_core::totp::{Totp, TotpAlgorithm};
+
+    let home = test_gnupghome();
+    let dir = scratch("pass-otp-write");
+    let store_dir = dir.join("store");
+    fs::create_dir_all(&store_dir).unwrap();
+    let fpr_a = fs::read_to_string(fixtures_root().join("keys/gpg-key-a.fpr")).unwrap();
+    fs::write(store_dir.join(".gpg-id"), format!("{}\n", fpr_a.trim())).unwrap();
+    let store = Store::open(&store_dir, StoreFormat::Pass).unwrap();
+    let backend = GpgCliBackend {
+        gnupghome: Some(home.clone()),
+    };
+
+    let totp = Totp::new(
+        "JBSWY3DPEHPK3PXP",
+        "kevin",
+        Some("Example"),
+        TotpAlgorithm::Sha256,
+        8,
+        30,
+    )
+    .unwrap();
+    let uri = totp.to_uri();
+
+    // Appended to a plain entry, and as the whole entry (the insert case).
+    let mut appended = Entry::from_bytes(b"pw\nusername: kevin\n".to_vec());
+    appended.set_otpauth(&uri);
+    store.write_entry("web/site", &appended, &backend).unwrap();
+    let mut only = Entry::from_bytes(Vec::new());
+    only.set_otpauth(&uri);
+    store.write_entry("otp-only", &only, &backend).unwrap();
+
+    for name in ["web/site", "otp-only"] {
+        assert_eq!(pass_otp(&store_dir, &home, &["uri", name]).trim(), uri);
+        // The CLI call can straddle a 30 s boundary; accept the code from
+        // either side of it.
+        let now = || {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+        };
+        let before = totp.code_at(now());
+        let cli = pass_otp(&store_dir, &home, &["code", name]);
+        let after = totp.code_at(now());
+        let cli = cli.trim();
+        assert!(
+            cli == before || cli == after,
+            "pass otp code {name} gave {cli}, ours {before}/{after}"
+        );
+    }
+    // The bytes the CLI sees are exactly ours.
+    assert_eq!(
+        pass_show(&store_dir, &home, "web/site"),
+        appended.to_bytes()
+    );
+    assert_eq!(pass_show(&store_dir, &home, "otp-only"), only.to_bytes());
+}
+
 #[test]
 fn reencrypt_subtree_follows_recipient_change() {
     let dir = scratch("passage-reencrypt");
