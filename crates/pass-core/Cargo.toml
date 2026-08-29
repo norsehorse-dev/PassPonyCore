@@ -13,6 +13,10 @@ hmac = "0.12"
 sha1 = "0.10"
 sha2 = "0.10"
 git2 = "0.20"
+# OS entropy for the password generator (generate.rs): getrandom(2) on
+# Android and Linux, the platform CSPRNG on iOS and macOS. Not crypto in the
+# CryptoBackend sense, so it stays inside the core.
+getrandom = "0.4"
 
 # Mobile targets have no system OpenSSL to link against; build it from source
 # there. Desktop/CI keep linking the system library.

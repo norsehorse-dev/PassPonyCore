@@ -1133,6 +1133,7 @@ dependencies = [
 name = "pass-core"
 version = "1.0.0"
 dependencies = [
+ "getrandom 0.4.3",
  "git2",
  "hmac",
  "openssl-sys",
