@@ -495,6 +495,52 @@ impl GitStore {
     }
 }
 
+/// Load a CA bundle into libgit2's TLS verify store.
+///
+/// libgit2 links a vendored OpenSSL with no system trust store on Android,
+/// so HTTPS clone/fetch/push fail certificate verification (class=Ssl (16),
+/// code GIT_ECERTIFICATE -17) against an empty set of trust anchors. On
+/// desktop, handing libgit2 the CA file path loads it into the verify store.
+/// On Android the vendored OpenSSL cannot open a file through its own BIO, so
+/// the file path is useless there; instead each root is parsed in Rust and
+/// added to the trust store from memory (see `add_ca_bundle_from_memory`).
+/// Call once at startup before any network op.
+pub fn init_tls(ca_file: &str) {
+    // Also initializes libgit2 and its OpenSSL cert store. On desktop this
+    // loads the CA file directly; on Android the vendored OpenSSL cannot open
+    // a cert file via its own BIO, so this is a no-op there and the memory add
+    // below provides the trust anchors instead.
+    let _ = unsafe { git2::opts::set_ssl_cert_file(ca_file) };
+
+    #[cfg(target_os = "android")]
+    add_ca_bundle_from_memory(ca_file);
+}
+
+/// Read a PEM CA bundle with Rust std (Android's OpenSSL cannot open it via its
+/// own file BIO) and add each root to libgit2's OpenSSL trust store from memory
+/// through GIT_OPT_ADD_SSL_X509_CERT. libgit2 up-refs each cert, so dropping our
+/// copies after is fine.
+#[cfg(target_os = "android")]
+fn add_ca_bundle_from_memory(ca_file: &str) {
+    use foreign_types_shared::ForeignType;
+    let Ok(bytes) = std::fs::read(ca_file) else {
+        return;
+    };
+    let Ok(certs) = openssl::x509::X509::stack_from_pem(&bytes) else {
+        return;
+    };
+    for cert in &certs {
+        // SAFETY: variadic libgit2 option; cert.as_ptr() is a live X509* from the
+        // same openssl-sys libgit2 links, valid for the duration of the call.
+        unsafe {
+            libgit2_sys::git_libgit2_opts(
+                libgit2_sys::GIT_OPT_ADD_SSL_X509_CERT as std::os::raw::c_int,
+                cert.as_ptr(),
+            );
+        }
+    }
+}
+
 /// Credentials for the transport layer. libgit2 treats URL userinfo only as
 /// a hint and still demands a callback, so this parses `user:token@` out of
 /// the remote URL and supplies it as plaintext credentials — the HTTPS+token

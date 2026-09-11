@@ -32,14 +32,13 @@ uniffi::setup_scaffolding!();
 /// class=Ssl (16)). On desktop and CI, OpenSSL finds the system store at
 /// its built-in path, which is why sync works there. The platform copies
 /// the app's bundled cacert.pem into local storage and passes its path
-/// here once at startup, before any clone/fetch/push. OpenSSL's default
-/// verify paths honor SSL_CERT_FILE, which is the store libgit2 falls back
-/// to when no explicit CA file is set on the transport.
+/// here once at startup, before any clone/fetch/push. The core loads the
+/// bundle's roots into libgit2's certificate store so the transport can
+/// verify the server.
 #[uniffi::export]
 pub fn init_tls(ca_file: String) {
-    // Safe on edition 2021, and only ever called once at process startup
-    // before any network or git use.
-    std::env::set_var("SSL_CERT_FILE", ca_file);
+    // Only ever called once at process startup, before any network or git use.
+    pass_core::git::init_tls(&ca_file);
 }
 
 /// FFI-facing crypto error. Mirrors `pass_core::crypto::CryptoError`; variants

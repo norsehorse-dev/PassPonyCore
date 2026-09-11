@@ -22,3 +22,13 @@ getrandom = "0.4"
 # there. Desktop/CI keep linking the system library.
 [target.'cfg(any(target_os = "ios", target_os = "android"))'.dependencies]
 openssl-sys = { version = "0.9", features = ["vendored"] }
+
+# Android-only: the vendored OpenSSL there cannot open a CA file via its own
+# BIO, so git2's file-based cert loading fails. We instead parse the bundle
+# with the openssl crate and add each root to libgit2's store from memory via
+# libgit2-sys' GIT_OPT_ADD_SSL_X509_CERT. Pinned to the exact versions git2
+# 0.20.4 already resolves so they link the same openssl-sys / libgit2-sys.
+[target.'cfg(target_os = "android")'.dependencies]
+openssl = "0.10"
+libgit2-sys = "0.18.7"
+foreign-types-shared = "0.1"  # ForeignType trait for X509::as_ptr
