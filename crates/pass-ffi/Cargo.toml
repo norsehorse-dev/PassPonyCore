@@ -20,7 +20,11 @@ zeroize = "1"
 # iOS keeps its own platform engine; this dependency and the module it
 # feeds are both gated behind the age-engine feature, off by default so
 # the iOS build surface is provably unchanged.
-age = { version = "0.11", default-features = false, optional = true }
+#
+# The `armor` feature is only for reading ASCII-armored passphrase-protected
+# identities files (see age_decrypt_identities_file); stores themselves are
+# binary age files.
+age = { version = "0.11", default-features = false, features = ["armor"], optional = true }
 
 [features]
 cli = ["uniffi/cli"]
