@@ -17,9 +17,11 @@ use std::io::{Read, Write};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use age::secrecy::ExposeSecret;
+use age::armor::ArmoredReader;
+use age::secrecy::{ExposeSecret, SecretString};
 use age::x25519::{Identity, Recipient as X25519Recipient};
-use age::{Decryptor, Encryptor};
+use age::{scrypt, DecryptError, Decryptor, Encryptor};
+use zeroize::Zeroizing;
 
 use crate::CryptoError;
 
@@ -42,6 +44,77 @@ pub fn age_generate_identity() -> GeneratedIdentity {
         identity_string: identity.to_string().expose_secret().to_owned(),
         recipient_string: identity.to_public().to_string(),
     }
+}
+
+/// Highest scrypt work factor (log2 N) accepted when unlocking a
+/// passphrase-protected identities file. age and gopass default to 18
+/// (256 MiB of scrypt memory); each step doubles memory and time, so 20
+/// (1 GiB) leaves 4x headroom for files written with a stronger setting
+/// while still refusing a hostile file that asks for an unbounded amount
+/// of work. age's own ceiling (target + 4 = 22) would need 4 GiB, which
+/// is not a safe ask on a phone.
+const MAX_IDENTITIES_SCRYPT_LOG_N: u8 = 20;
+
+const AGE_BINARY_MAGIC: &[u8] = b"age-encryption.org/v1";
+const AGE_ARMOR_MAGIC: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----";
+
+/// True when `data` looks like an age-encrypted file (binary header or
+/// ASCII armor) rather than a plaintext identities file. A cheap prefix
+/// check, not a parse: it only decides whether to ask for a passphrase.
+#[uniffi::export]
+pub fn age_is_encrypted_identities_file(data: Vec<u8>) -> bool {
+    let data = data.trim_ascii_start();
+    data.starts_with(AGE_BINARY_MAGIC) || data.starts_with(AGE_ARMOR_MAGIC)
+}
+
+/// Decrypts a passphrase-protected (scrypt) age identities file, as
+/// written by `age -p` or gopass's age backend, binary or armored, and
+/// returns the plaintext identities text as bytes so the caller can
+/// clear them after use. Feed the result to
+/// `AgeEngine::from_identities_text` / the app's import validation.
+///
+/// Errors carry no file content: a wrong passphrase and a file that is
+/// not passphrase-encrypted both report `DecryptionFailed`; a file that
+/// demands more scrypt work than `MAX_IDENTITIES_SCRYPT_LOG_N` reports
+/// `Unavailable` rather than burning the device's memory on it.
+#[uniffi::export]
+pub fn age_decrypt_identities_file(
+    data: Vec<u8>,
+    passphrase: String,
+) -> Result<Vec<u8>, CryptoError> {
+    decrypt_identities_file(data, passphrase, MAX_IDENTITIES_SCRYPT_LOG_N)
+}
+
+fn decrypt_identities_file(
+    data: Vec<u8>,
+    passphrase: String,
+    max_log_n: u8,
+) -> Result<Vec<u8>, CryptoError> {
+    let passphrase = SecretString::from(passphrase);
+    // Same leading-whitespace tolerance as `age_is_encrypted_identities_file`,
+    // so a file detected as encrypted is also one the reader accepts.
+    let decryptor = Decryptor::new(ArmoredReader::new(data.trim_ascii_start()))
+        .map_err(|_| CryptoError::DecryptionFailed)?;
+    if !decryptor.is_scrypt() {
+        return Err(CryptoError::DecryptionFailed);
+    }
+
+    let mut identity = scrypt::Identity::new(passphrase);
+    identity.set_max_work_factor(max_log_n);
+    let mut reader = decryptor
+        .decrypt(std::iter::once(&identity as &dyn age::Identity))
+        .map_err(|e| match e {
+            DecryptError::ExcessiveWork { .. } => CryptoError::Unavailable {
+                reason: "passphrase work factor too high for this device".to_owned(),
+            },
+            _ => CryptoError::DecryptionFailed,
+        })?;
+
+    let mut plaintext = Zeroizing::new(Vec::new());
+    reader
+        .read_to_end(&mut plaintext)
+        .map_err(|_| CryptoError::DecryptionFailed)?;
+    Ok(std::mem::take(&mut *plaintext))
 }
 
 /// A loaded set of age identities, implementing the same
@@ -255,5 +328,175 @@ mod tests {
         let engine = AgeEngine::from_identities_text(identities_text);
         let plaintext = engine.decrypt(ciphertext).expect("decrypt fixture entry");
         assert_eq!(plaintext, b"alpha-password-1\n");
+    }
+
+    // Fixture 6 of docs/passage-store-semantics.md, written by the real
+    // `age -p` CLI (armored `identities`, binary `identities.binary`).
+    const PASSPHRASE_FIXTURE_PW: &str = "correct horse pony";
+
+    fn passphrase_fixture(name: &str) -> Vec<u8> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/passage/passphrase-identities");
+        std::fs::read(dir.join(name)).unwrap_or_else(|_| panic!("fixture {name} present"))
+    }
+
+    #[test]
+    fn passphrase_identities_binary_decrypts_to_plain_identities() {
+        let plain = passphrase_fixture("identities.plain");
+        let got = age_decrypt_identities_file(
+            passphrase_fixture("identities.binary"),
+            PASSPHRASE_FIXTURE_PW.to_owned(),
+        )
+        .expect("decrypt binary fixture");
+        assert_eq!(got, plain);
+
+        // And the result is directly usable as an identities file.
+        let engine = AgeEngine::from_identities_text(String::from_utf8(got).unwrap());
+        let ct = engine.encrypt(b"x\n".to_vec(), vec![]).unwrap();
+        assert_eq!(engine.decrypt(ct).unwrap(), b"x\n");
+    }
+
+    #[test]
+    fn passphrase_identities_armored_decrypts_to_plain_identities() {
+        let got = age_decrypt_identities_file(
+            passphrase_fixture("identities"),
+            PASSPHRASE_FIXTURE_PW.to_owned(),
+        )
+        .expect("decrypt armored fixture");
+        assert_eq!(got, passphrase_fixture("identities.plain"));
+    }
+
+    #[test]
+    fn unlocked_identities_decrypt_the_fixture_store_entry() {
+        let text = age_decrypt_identities_file(
+            passphrase_fixture("identities"),
+            PASSPHRASE_FIXTURE_PW.to_owned(),
+        )
+        .unwrap();
+        let engine = AgeEngine::from_identities_text(String::from_utf8(text).unwrap());
+        let plaintext = engine
+            .decrypt(passphrase_fixture("store/alpha.age"))
+            .unwrap();
+        assert_eq!(plaintext, passphrase_fixture("goldens/alpha.plain"));
+    }
+
+    #[test]
+    fn multi_identity_passphrase_file_unlocks_both_identities() {
+        let text = String::from_utf8(
+            age_decrypt_identities_file(
+                passphrase_fixture("identities.multi"),
+                PASSPHRASE_FIXTURE_PW.to_owned(),
+            )
+            .expect("decrypt multi-identity fixture"),
+        )
+        .unwrap();
+        assert!(text.starts_with("# gopass-style"));
+
+        let recipients: Vec<String> = text
+            .lines()
+            .filter_map(|l| l.strip_prefix("# public key: "))
+            .map(str::to_owned)
+            .collect();
+        let secrets: Vec<&str> = text
+            .lines()
+            .filter(|l| l.starts_with("AGE-SECRET-KEY-1"))
+            .collect();
+        assert_eq!((recipients.len(), secrets.len()), (2, 2));
+
+        let engine = AgeEngine::from_identities_text(text.clone());
+        for (i, recipient) in recipients.iter().enumerate() {
+            let entry = format!("entry-for-identity-{}\n", i + 1).into_bytes();
+            let ct = engine
+                .encrypt(entry.clone(), vec![recipient.clone()])
+                .expect("encrypt to one recipient only");
+            assert_eq!(engine.decrypt(ct.clone()).unwrap(), entry);
+
+            // Only that one identity opens it, not the other.
+            let own = AgeEngine::from_identities_text(secrets[i].to_owned());
+            let other = AgeEngine::from_identities_text(secrets[1 - i].to_owned());
+            assert_eq!(own.decrypt(ct.clone()).unwrap(), entry);
+            assert!(matches!(
+                other.decrypt(ct).unwrap_err(),
+                CryptoError::DecryptionFailed
+            ));
+        }
+    }
+
+    #[test]
+    fn passphrase_identities_wrong_passphrase_fails_cleanly() {
+        for name in ["identities.binary", "identities"] {
+            let err = age_decrypt_identities_file(passphrase_fixture(name), "wrong".to_owned())
+                .unwrap_err();
+            assert!(matches!(err, CryptoError::DecryptionFailed), "{name}");
+        }
+    }
+
+    #[test]
+    fn passphrase_identities_rejects_non_age_and_non_passphrase_input() {
+        let plain = passphrase_fixture("identities.plain");
+        let err = age_decrypt_identities_file(plain, "x".to_owned()).unwrap_err();
+        assert!(matches!(err, CryptoError::DecryptionFailed));
+
+        // A real age file encrypted to an X25519 recipient is not a
+        // passphrase file either.
+        let generated = age_generate_identity();
+        let engine = AgeEngine::from_identities_text(generated.identity_string);
+        let ct = engine.encrypt(b"x".to_vec(), vec![]).unwrap();
+        let err = age_decrypt_identities_file(ct, "x".to_owned()).unwrap_err();
+        assert!(matches!(err, CryptoError::DecryptionFailed));
+    }
+
+    #[test]
+    fn passphrase_identities_excessive_work_factor_is_refused() {
+        let mut recipient = scrypt::Recipient::new(SecretString::from("pw".to_owned()));
+        // Cheap to write, over the (lowered) ceiling used below; the check
+        // fires before any scrypt work, so the real 2^20 limit is not
+        // exercised with a multi-GiB file here.
+        recipient.set_work_factor(12);
+        let encryptor =
+            Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient)).unwrap();
+        let mut ct = Vec::new();
+        let mut w = encryptor.wrap_output(&mut ct).unwrap();
+        w.write_all(b"AGE-SECRET-KEY-1X\n").unwrap();
+        w.finish().unwrap();
+
+        let err = decrypt_identities_file(ct.clone(), "pw".to_owned(), 11).unwrap_err();
+        assert!(matches!(err, CryptoError::Unavailable { .. }));
+
+        // At or under the ceiling the same file opens.
+        let got = decrypt_identities_file(ct, "pw".to_owned(), 12).unwrap();
+        assert_eq!(got, b"AGE-SECRET-KEY-1X\n");
+    }
+
+    #[test]
+    fn padded_armored_identities_decrypt() {
+        // Detection skips leading whitespace, so decryption must too.
+        let mut padded = b"\n  ".to_vec();
+        padded.extend(passphrase_fixture("identities"));
+        let got = age_decrypt_identities_file(padded, PASSPHRASE_FIXTURE_PW.to_owned())
+            .expect("decrypt padded armored fixture");
+        assert_eq!(got, passphrase_fixture("identities.plain"));
+    }
+
+    #[test]
+    fn encrypted_identities_detection() {
+        assert!(age_is_encrypted_identities_file(passphrase_fixture(
+            "identities.binary"
+        )));
+        assert!(age_is_encrypted_identities_file(passphrase_fixture(
+            "identities"
+        )));
+        let mut padded = b"\n  ".to_vec();
+        padded.extend(passphrase_fixture("identities"));
+        assert!(age_is_encrypted_identities_file(padded));
+
+        // Plaintext identities (with and without comments) pass through.
+        assert!(!age_is_encrypted_identities_file(passphrase_fixture(
+            "identities.plain"
+        )));
+        assert!(!age_is_encrypted_identities_file(
+            b"AGE-SECRET-KEY-1ABC\n".to_vec()
+        ));
+        assert!(!age_is_encrypted_identities_file(Vec::new()));
     }
 }
