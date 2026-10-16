@@ -91,8 +91,10 @@ fn decrypt_identities_file(
     max_log_n: u8,
 ) -> Result<Vec<u8>, CryptoError> {
     let passphrase = SecretString::from(passphrase);
-    let decryptor =
-        Decryptor::new(ArmoredReader::new(&data[..])).map_err(|_| CryptoError::DecryptionFailed)?;
+    // Same leading-whitespace tolerance as `age_is_encrypted_identities_file`,
+    // so a file detected as encrypted is also one the reader accepts.
+    let decryptor = Decryptor::new(ArmoredReader::new(data.trim_ascii_start()))
+        .map_err(|_| CryptoError::DecryptionFailed)?;
     if !decryptor.is_scrypt() {
         return Err(CryptoError::DecryptionFailed);
     }
@@ -464,6 +466,16 @@ mod tests {
         // At or under the ceiling the same file opens.
         let got = decrypt_identities_file(ct, "pw".to_owned(), 12).unwrap();
         assert_eq!(got, b"AGE-SECRET-KEY-1X\n");
+    }
+
+    #[test]
+    fn padded_armored_identities_decrypt() {
+        // Detection skips leading whitespace, so decryption must too.
+        let mut padded = b"\n  ".to_vec();
+        padded.extend(passphrase_fixture("identities"));
+        let got = age_decrypt_identities_file(padded, PASSPHRASE_FIXTURE_PW.to_owned())
+            .expect("decrypt padded armored fixture");
+        assert_eq!(got, passphrase_fixture("identities.plain"));
     }
 
     #[test]
