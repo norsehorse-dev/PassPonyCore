@@ -16,6 +16,9 @@ pub use store_api::*;
 mod keys_otp_api;
 pub use keys_otp_api::*;
 
+mod ssh_api;
+pub use ssh_api::*;
+
 // Android-only Rust age engine. Off by default (iOS's FFI surface is
 // unchanged unless this feature is explicitly enabled); see
 // docs/plan/P04-core-age-engine.md in PassPonyAndroid for why this lives

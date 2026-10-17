@@ -17,6 +17,11 @@ git2 = "0.20"
 # Android and Linux, the platform CSPRNG on iOS and macOS. Not crypto in the
 # CryptoBackend sense, so it stays inside the core.
 getrandom = "0.4"
+# SSH remotes (2.0 rc2): parse, decrypt and generate OpenSSH private keys for
+# the libssh2 transport git2 already builds. Generation is Ed25519 only;
+# import also takes RSA and ECDSA keys in OpenSSH format. No RSA arithmetic
+# runs here (libssh2 signs), so the rsa feature stays off.
+ssh-key = { version = "0.6.7", default-features = false, features = ["std", "ecdsa", "ed25519", "encryption", "getrandom"] }
 
 # Mobile targets have no system OpenSSL to link against; build it from source
 # there. Desktop/CI keep linking the system library.

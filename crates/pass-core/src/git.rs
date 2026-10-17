@@ -8,15 +8,19 @@
 //! Commit messages mirror the CLIs (see docs/passage-store-semantics.md §5)
 //! so a store managed by PassPony reads naturally in `pass git log`.
 
+use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use git2::{
     build::CheckoutBuilder, AnnotatedCommit, ErrorCode, FetchOptions, IndexEntry, Oid, Rebase,
     RebaseOptions, Repository, Signature,
 };
 
+use crate::ssh::{self, HostCheck, HostKey, RemoteScheme};
 use crate::store::StoreFormat;
+use zeroize::Zeroizing;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
@@ -34,6 +38,41 @@ pub enum GitError {
     UpstreamRewritten,
     #[error("working tree has uncommitted changes")]
     DirtyWorkdir,
+    /// First connection to an SSH host: show the fingerprint, and pin the
+    /// key with `ssh::known_hosts_add` if the user trusts it.
+    #[error("unknown SSH host {host} ({fingerprint})", fingerprint = key.fingerprint)]
+    UnknownHostKey { host: String, key: HostKey },
+    /// A pinned SSH host presented a different key. No way past this but
+    /// forgetting the host on purpose.
+    #[error("SSH host key for {host} changed: now {fingerprint}, pinned {pinned_fingerprint}")]
+    HostKeyChanged {
+        host: String,
+        fingerprint: String,
+        pinned_fingerprint: String,
+    },
+    #[error("the SSH host didn't send a usable host key")]
+    NoHostKey,
+    #[error("this remote needs an SSH key and none is set up")]
+    SshKeyMissing,
+    #[error("the SSH host didn't accept this app's key")]
+    SshAuthFailed,
+}
+
+/// What SSH remotes need from the app: its private key (unencrypted
+/// OpenSSH text, handed to libssh2 from memory) and the hosts it trusts
+/// (OpenSSH known_hosts text). HTTPS remotes ignore both.
+#[derive(Clone, Default)]
+pub struct SshConfig {
+    pub private_key: Option<Zeroizing<String>>,
+    pub known_hosts: String,
+}
+
+impl std::fmt::Debug for SshConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SshConfig")
+            .field("has_key", &self.private_key.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Pass-style commit messages, one place so every caller matches the CLIs.
@@ -129,6 +168,7 @@ pub struct SyncStatus {
 pub struct GitStore {
     repo: Repository,
     root: PathBuf,
+    ssh: SshConfig,
 }
 
 impl GitStore {
@@ -158,7 +198,11 @@ impl GitStore {
             config.set_str("user.name", "PassPony")?;
             config.set_str("user.email", "passpony@localhost")?;
         }
-        let s = GitStore { repo, root };
+        let s = GitStore {
+            repo,
+            root,
+            ssh: SshConfig::default(),
+        };
         s.commit_all(&messages::initial())?;
         let attributes = format!("*.{ext} diff={ext}\n");
         fs::write(s.root.join(".gitattributes"), attributes)?;
@@ -175,7 +219,16 @@ impl GitStore {
                 GitError::Git(e)
             }
         })?;
-        Ok(GitStore { repo, root })
+        Ok(GitStore {
+            repo,
+            root,
+            ssh: SshConfig::default(),
+        })
+    }
+
+    /// The key and known hosts used by fetch, sync and push from now on.
+    pub fn set_ssh(&mut self, ssh: SshConfig) {
+        self.ssh = ssh;
     }
 
     /// Clone a store. `depth` enables shallow clone for huge stores.
@@ -184,15 +237,34 @@ impl GitStore {
         dest: impl Into<PathBuf>,
         depth: Option<i32>,
     ) -> Result<Self, GitError> {
+        Self::clone_with_ssh(url, dest, depth, SshConfig::default())
+    }
+
+    /// Clone over any transport; SSH remotes use `ssh`, which the returned
+    /// store keeps for later fetches and pushes.
+    pub fn clone_with_ssh(
+        url: &str,
+        dest: impl Into<PathBuf>,
+        depth: Option<i32>,
+        ssh: SshConfig,
+    ) -> Result<Self, GitError> {
         let dest = dest.into();
         let mut fo = FetchOptions::new();
         if let Some(d) = depth {
             fo.depth(d);
         }
-        fo.remote_callbacks(auth_callbacks(url));
+        let (callbacks, problem) = transport_callbacks(url, &ssh);
+        fo.remote_callbacks(callbacks);
         let repo = git2::build::RepoBuilder::new()
             .fetch_options(fo)
-            .clone(url, &dest)?;
+            .clone(url, &dest);
+        let repo = transport_result(repo, &problem)?;
+        // An empty remote leaves HEAD on libgit2's default `master`, while
+        // init() and the bare repos git hosts create use `main`; the first
+        // push would then create a branch nobody's HEAD points at.
+        if repo.is_empty()? {
+            repo.set_head("refs/heads/main")?;
+        }
         // A cloned repo has no local identity until something sets one --
         // a fresh device's very first commit (the first edit made after
         // setting up from an existing remote) would otherwise fail with
@@ -202,7 +274,11 @@ impl GitStore {
             config.set_str("user.name", "PassPony")?;
             config.set_str("user.email", "passpony@localhost")?;
         }
-        Ok(GitStore { repo, root: dest })
+        Ok(GitStore {
+            repo,
+            root: dest,
+            ssh,
+        })
     }
 
     /// The `origin` remote's URL, if configured. May contain embedded
@@ -323,8 +399,10 @@ impl GitStore {
             .map_err(|_| GitError::NoRemote)?;
         let branch = self.head_branch()?;
         let mut fo = FetchOptions::new();
-        fo.remote_callbacks(auth_callbacks(url.as_deref().unwrap_or("")));
-        remote.fetch(&[branch.as_str()], Some(&mut fo), None)?;
+        let (callbacks, problem) = transport_callbacks(url.as_deref().unwrap_or(""), &self.ssh);
+        fo.remote_callbacks(callbacks);
+        let fetched = remote.fetch(&[branch.as_str()], Some(&mut fo), None);
+        transport_result(fetched, &problem)?;
         Ok(())
     }
 
@@ -476,19 +554,22 @@ impl GitStore {
         let branch = self.head_branch()?;
         let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
         let mut po = git2::PushOptions::new();
-        po.remote_callbacks(auth_callbacks(url.as_deref().unwrap_or("")));
-        remote
-            .push(&[refspec.as_str()], Some(&mut po))
-            .map_err(|e| {
-                if e.code() == ErrorCode::NotFastForward
-                    || e.message().contains("non-fast-forward")
-                    || e.message().contains("failed to update ref")
-                {
-                    GitError::NonFastForward
-                } else {
-                    GitError::Git(e)
-                }
-            })?;
+        let (callbacks, problem) = transport_callbacks(url.as_deref().unwrap_or(""), &self.ssh);
+        po.remote_callbacks(callbacks);
+        let pushed = remote.push(&[refspec.as_str()], Some(&mut po));
+        if let Some(p) = problem.borrow_mut().take() {
+            return Err(p);
+        }
+        pushed.map_err(|e| {
+            if e.code() == ErrorCode::NotFastForward
+                || e.message().contains("non-fast-forward")
+                || e.message().contains("failed to update ref")
+            {
+                GitError::NonFastForward
+            } else {
+                GitError::Git(e)
+            }
+        })?;
         // Update the tracking ref so ahead/behind stays accurate even where
         // the transport doesn't report it back.
         if let Ok(Some(oid)) = self.repo.head().map(|h| h.target()) {
@@ -549,28 +630,115 @@ fn add_ca_bundle_from_memory(ca_file: &str) {
     }
 }
 
-/// Credentials for the transport layer. libgit2 treats URL userinfo only as
-/// a hint and still demands a callback, so this parses `user:token@` out of
-/// the remote URL and supplies it as plaintext credentials — the HTTPS+token
-/// path. SSH credentials land with the P2.5 auth work (keygen, TOFU).
-fn auth_callbacks(url: &str) -> git2::RemoteCallbacks<'static> {
+/// Set by a transport callback when it refuses something the user should
+/// hear about in plain words; checked before libgit2's generic error.
+type TransportProblem = Rc<RefCell<Option<GitError>>>;
+
+/// Credentials and host-key checks for one network operation.
+///
+/// HTTPS: libgit2 treats URL userinfo only as a hint and still demands a
+/// callback, so `user:token@` is parsed out of the remote URL and supplied
+/// as plaintext credentials.
+///
+/// SSH: the username comes from the URL (`git` when there is none), the key
+/// is the app's, handed over from memory, and the host key must be pinned
+/// in `ssh.known_hosts`. An unknown or changed host key stops the
+/// connection before authentication and is reported as its own error.
+fn transport_callbacks(
+    url: &str,
+    ssh: &SshConfig,
+) -> (git2::RemoteCallbacks<'static>, TransportProblem) {
+    let problem: TransportProblem = Rc::new(RefCell::new(None));
     let creds = parse_userinfo(url);
+    let endpoint = ssh::ssh_endpoint(url);
+    let key = ssh.private_key.clone();
+    let url_user = endpoint.as_ref().and_then(|e| e.user.clone());
+    let mut key_offered = false;
     let mut cbs = git2::RemoteCallbacks::new();
+    let cred_problem = problem.clone();
     cbs.credentials(move |_url, username_from_url, allowed| {
         if allowed.contains(git2::CredentialType::USER_PASS_PLAINTEXT) {
             if let Some((user, pass)) = &creds {
                 return git2::Cred::userpass_plaintext(user, pass);
             }
         }
+        let user = username_from_url
+            .map(str::to_owned)
+            .or_else(|| url_user.clone())
+            .unwrap_or_else(|| "git".to_owned());
+        if allowed.contains(git2::CredentialType::USERNAME) {
+            return git2::Cred::username(&user);
+        }
+        if allowed.intersects(git2::CredentialType::SSH_KEY | git2::CredentialType::SSH_MEMORY) {
+            let Some(key) = &key else {
+                *cred_problem.borrow_mut() = Some(GitError::SshKeyMissing);
+                return Err(git2::Error::from_str("no SSH key"));
+            };
+            if key_offered {
+                // libgit2 asks again after a rejected key; once is enough.
+                *cred_problem.borrow_mut() = Some(GitError::SshAuthFailed);
+                return Err(git2::Error::from_str("SSH key rejected"));
+            }
+            key_offered = true;
+            return git2::Cred::ssh_key_from_memory(&user, None, key, None);
+        }
         if allowed.contains(git2::CredentialType::DEFAULT) {
             return git2::Cred::default();
         }
-        let hint = username_from_url.unwrap_or("");
         Err(git2::Error::from_str(&format!(
-            "no usable credentials for {hint} (HTTPS: embed user:token in the URL; SSH support pending)"
+            "no usable credentials for {user} (HTTPS: embed user:token in the URL)"
         )))
     });
-    cbs
+    if let Some(endpoint) = endpoint {
+        let host_name = endpoint.known_hosts_name();
+        let known_hosts = ssh.known_hosts.clone();
+        let cert_problem = problem.clone();
+        cbs.certificate_check(move |cert, _hostname| {
+            let Some(hostkey) = cert.as_hostkey() else {
+                return Ok(git2::CertificateCheckStatus::CertificatePassthrough);
+            };
+            let Some(presented) = hostkey.hostkey().and_then(HostKey::from_blob) else {
+                *cert_problem.borrow_mut() = Some(GitError::NoHostKey);
+                return Err(git2::Error::from_str("no host key"));
+            };
+            match ssh::known_hosts_check(&known_hosts, &host_name, &presented) {
+                HostCheck::Trusted => Ok(git2::CertificateCheckStatus::CertificateOk),
+                HostCheck::Unknown => {
+                    *cert_problem.borrow_mut() = Some(GitError::UnknownHostKey {
+                        host: host_name.clone(),
+                        key: presented,
+                    });
+                    Err(git2::Error::from_str("unknown host key"))
+                }
+                HostCheck::Changed { pinned_fingerprint } => {
+                    *cert_problem.borrow_mut() = Some(GitError::HostKeyChanged {
+                        host: host_name.clone(),
+                        fingerprint: presented.fingerprint,
+                        pinned_fingerprint,
+                    });
+                    Err(git2::Error::from_str("host key changed"))
+                }
+            }
+        });
+    }
+    (cbs, problem)
+}
+
+/// A network result, with a refusal from the callbacks taking precedence
+/// over libgit2's generic message for it.
+fn transport_result<T>(
+    result: Result<T, git2::Error>,
+    problem: &TransportProblem,
+) -> Result<T, GitError> {
+    match result {
+        Ok(v) => Ok(v),
+        Err(e) => Err(problem.borrow_mut().take().unwrap_or(GitError::Git(e))),
+    }
+}
+
+/// Which transport a remote URL uses; for Diagnostics and the URL fields.
+pub fn remote_scheme(url: &str) -> RemoteScheme {
+    ssh::remote_scheme(url)
 }
 
 /// Extract percent-decoded `user:password` from a URL's userinfo section.

@@ -108,10 +108,8 @@ jobs:
       fail-fast: false
       matrix:
         server:
-          # TODO(P2 continuation): ssh-bare leg (OpenSSH container + bare
-          # repo) joins this matrix when the SSH credentials callback and
-          # TOFU known_hosts handling land in the engine. Tracked in
-          # docs/conflict-ux.md test-coverage map.
+          # The SSH leg is its own job (ssh-bare below): it needs a key,
+          # a pinned host and the refusal cases, not just a URL.
           - name: forgejo
             setup: |
               docker run -d --name forgejo -p 3000:3000 -p 2223:22 \
@@ -139,3 +137,62 @@ jobs:
           # Remote-matrix tests are gated behind this env var; without it the
           # git tests run against local bare repos only.
         run: cargo test --locked -p pass-devtools --test git_matrix
+
+  ssh-bare:
+    name: SSH remote vs OpenSSH + bare repo (${{ matrix.key.name }})
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        key:
+          # A key generated the way the apps import one, with a passphrase,
+          # plus the committed RSA and ECDSA fixtures.
+          - name: ed25519-protected
+            setup: ssh-keygen -q -t ed25519 -N "ci pass" -C ci-client -f "$RUNNER_TEMP/client"
+            passphrase: ci pass
+          - name: rsa-protected
+            setup: cp fixtures/ssh/rsa-protected fixtures/ssh/rsa-protected.pub "$RUNNER_TEMP/" && mv "$RUNNER_TEMP/rsa-protected" "$RUNNER_TEMP/client" && mv "$RUNNER_TEMP/rsa-protected.pub" "$RUNNER_TEMP/client.pub"
+            passphrase: pony ssh test
+          - name: ecdsa
+            setup: cp fixtures/ssh/ecdsa-plain "$RUNNER_TEMP/client" && cp fixtures/ssh/ecdsa-plain.pub "$RUNNER_TEMP/client.pub"
+            passphrase: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Client key
+        run: ${{ matrix.key.setup }}
+      - name: OpenSSH server with an empty bare repo
+        run: |
+          sudo apt-get update && sudo apt-get install -y openssh-server
+          sudo useradd -m -s /bin/bash gitci
+          sudo usermod -p '*' gitci
+          sudo install -d -m 700 -o gitci -g gitci /home/gitci/.ssh
+          sudo install -m 600 -o gitci -g gitci "$RUNNER_TEMP/client.pub" /home/gitci/.ssh/authorized_keys
+          sudo -u gitci git init -q --bare -b main /home/gitci/store.git
+          ssh-keygen -q -t ed25519 -N "" -f "$RUNNER_TEMP/host_ed25519"
+          cat > "$RUNNER_TEMP/sshd_config" <<EOF
+          Port 2222
+          ListenAddress 127.0.0.1
+          HostKey $RUNNER_TEMP/host_ed25519
+          PidFile $RUNNER_TEMP/sshd.pid
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          PubkeyAuthentication yes
+          UsePAM no
+          StrictModes no
+          EOF
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -f "$RUNNER_TEMP/sshd_config" -E "$RUNNER_TEMP/sshd.log"
+      - name: Clone, push, pull, and every refusal over SSH
+        env:
+          PASSPONY_SSH_URL: ssh://gitci@127.0.0.1:2222/home/gitci/store.git
+          PASSPONY_SSH_KEY: ${{ runner.temp }}/client
+          PASSPONY_SSH_HOST_KEY: ${{ runner.temp }}/host_ed25519.pub
+        run: |
+          if [ -n "${{ matrix.key.passphrase }}" ]; then export PASSPONY_SSH_KEY_PASSPHRASE="${{ matrix.key.passphrase }}"; fi
+          cargo test --locked -p pass-devtools --test ssh_remote -- --nocapture
+      - name: sshd log
+        if: failure()
+        run: cat "$RUNNER_TEMP/sshd.log"

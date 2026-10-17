@@ -498,6 +498,26 @@ pub enum GitError {
     UpstreamRewritten,
     #[error("uncommitted changes present")]
     DirtyWorkdir,
+    /// First connection to an SSH host: show `key.fingerprint`, and on the
+    /// user's yes pin it with `known_hosts_add(text, host, key)` and retry.
+    #[error("unknown SSH host {host}")]
+    UnknownHostKey {
+        host: String,
+        key: crate::ssh_api::HostKey,
+    },
+    /// A pinned host presented a different key. Refuse; no override.
+    #[error("SSH host key for {host} changed")]
+    HostKeyChanged {
+        host: String,
+        fingerprint: String,
+        pinned_fingerprint: String,
+    },
+    #[error("the SSH host sent no usable host key")]
+    NoHostKey,
+    #[error("this remote needs an SSH key and none is set up")]
+    SshKeyMissing,
+    #[error("the SSH host didn't accept this app's key")]
+    SshAuthFailed,
     #[error("git: {reason}")]
     Other { reason: String },
 }
@@ -511,9 +531,42 @@ impl From<pass_core::git::GitError> for GitError {
             E::NonFastForward => GitError::NonFastForward,
             E::UpstreamRewritten => GitError::UpstreamRewritten,
             E::DirtyWorkdir => GitError::DirtyWorkdir,
+            E::UnknownHostKey { host, key } => GitError::UnknownHostKey {
+                host,
+                key: key.into(),
+            },
+            E::HostKeyChanged {
+                host,
+                fingerprint,
+                pinned_fingerprint,
+            } => GitError::HostKeyChanged {
+                host,
+                fingerprint,
+                pinned_fingerprint,
+            },
+            E::NoHostKey => GitError::NoHostKey,
+            E::SshKeyMissing => GitError::SshKeyMissing,
+            E::SshAuthFailed => GitError::SshAuthFailed,
             other => GitError::Other {
                 reason: other.to_string(),
             },
+        }
+    }
+}
+
+/// What SSH remotes need: the app's key (unencrypted OpenSSH text) and its
+/// known_hosts text. HTTPS remotes ignore it, so passing it always is fine.
+#[derive(Clone, uniffi::Record)]
+pub struct SshConfig {
+    pub private_key: Option<String>,
+    pub known_hosts: String,
+}
+
+impl From<SshConfig> for pass_core::git::SshConfig {
+    fn from(c: SshConfig) -> Self {
+        pass_core::git::SshConfig {
+            private_key: c.private_key.map(zeroize::Zeroizing::new),
+            known_hosts: c.known_hosts,
         }
     }
 }
@@ -584,6 +637,30 @@ impl GitSync {
         Ok(Arc::new(GitSync {
             inner: Mutex::new(pass_core::git::GitStore::clone_from(&url, dest, depth)?),
         }))
+    }
+
+    /// Clone with SSH settings; the handle keeps them for sync and push.
+    #[uniffi::constructor]
+    pub fn clone_with_ssh(
+        url: String,
+        dest: String,
+        depth: Option<i32>,
+        ssh: SshConfig,
+    ) -> Result<Arc<Self>, GitError> {
+        Ok(Arc::new(GitSync {
+            inner: Mutex::new(pass_core::git::GitStore::clone_with_ssh(
+                &url,
+                dest,
+                depth,
+                ssh.into(),
+            )?),
+        }))
+    }
+
+    /// The SSH key and known hosts used by later syncs and pushes. Call it
+    /// again after the user pins a host or changes the key.
+    pub fn set_ssh(&self, ssh: SshConfig) {
+        self.inner.lock().unwrap().set_ssh(ssh.into());
     }
 
     pub fn status(&self) -> Result<SyncStatus, GitError> {

@@ -22,6 +22,9 @@ const TRAILER: &str = "end";
 /// as `Unknown` so a newer backup still restores what this version knows.
 pub const KIND_AGE_IDENTITIES: &str = "age-identities";
 pub const KIND_PGP_SECRET_KEY: &str = "pgp-secret-key";
+/// The app's SSH key (2.0 rc2), unencrypted OpenSSH text; the backup's own
+/// encryption is what protects it.
+pub const KIND_SSH_PRIVATE_KEY: &str = "ssh-private-key";
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum BackupError {

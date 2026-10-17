@@ -103,4 +103,4 @@ storage mode. Every error sheet above links to it.
 | Non-FF push → sync → push | `git_matrix.rs` |
 | Offline badge counts | `git_matrix.rs` |
 | Force-push recovery | engine detection + flows land with the app work (P3); scenario scripted in CI matrix before beta — gate item, not optional |
-| SSH auth/TOFU edge cases | CI matrix (bare-over-SSH container), P2 continuation |
+| SSH auth/TOFU edge cases | `ssh_remote.rs` vs OpenSSH + bare repo (CI `ssh-bare`, Ed25519/RSA/ECDSA keys): unknown host, pinned, changed key, no key, rejected key |

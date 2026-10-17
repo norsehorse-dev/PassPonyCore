@@ -17,3 +17,4 @@ path = "src/bin/passpony-dump.rs"
 
 [dev-dependencies]
 git2 = "0.20"
+zeroize = "1"

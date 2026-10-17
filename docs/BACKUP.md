@@ -64,10 +64,13 @@ Line-based header, length-prefixed bodies, so key material can be any bytes:
 |------------------|-------------------------------------------------------|----------------------|
 | `age-identities` | the app's age identities file, verbatim               | empty                |
 | `pgp-secret-key` | one imported OpenPGP secret key, armored or binary    | the key's file name  |
+| `ssh-private-key`| the app's SSH key, unencrypted OpenSSH format (2.0 rc2) | empty              |
 
 A reader keeps sections of kinds it does not know and reports them instead
 of failing, so a backup from a newer version still restores everything an
-older version understands. rc2 of 2.0 adds `ssh-private-key`.
+older version understands. `ssh-private-key` arrived in 2.0 rc2 without a
+version change for exactly that reason: an rc1 reader keeps it as an
+unknown section and restores the rest.
 
 ## Restore rules
 
@@ -75,6 +78,9 @@ older version understands. rc2 of 2.0 adds `ssh-private-key`.
   (`identities_merge`): appended if new, skipped if already present, never
   replacing what is there.
 - Restored PGP keys are imported the same way a picked key file is.
+- A restored SSH key becomes the app's SSH key only when the app has none;
+  when it already has a different one, the app asks before replacing it,
+  since the old key may be the one a git host knows.
 - Wrong recovery code and damaged backup both fail before anything is
   written.
 
