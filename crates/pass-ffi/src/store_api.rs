@@ -145,6 +145,81 @@ impl PassStore {
         let adapter = ForeignBackendAdapter(backend);
         Ok(self.inner.reencrypt_subtree(&subpath, &adapter)?)
     }
+
+    /// 2.0 rc4: re-encrypt what this device can open and leave the rest
+    /// untouched, counting it (see `pass_core::store::Store::reencrypt_readable`).
+    pub fn reencrypt_readable(
+        &self,
+        subpath: String,
+        backend: Arc<dyn CryptoBackend>,
+    ) -> Result<ReencryptReport, StoreError> {
+        let adapter = ForeignBackendAdapter(backend);
+        let r = self.inner.reencrypt_readable(&subpath, &adapter)?;
+        Ok(ReencryptReport {
+            rewritten: r.rewritten,
+            skipped: r.skipped,
+        })
+    }
+
+    /// The root `.age-recipients` (or `.gpg-id`) text, if the store has one.
+    pub fn root_recipients(&self) -> Result<Option<String>, StoreError> {
+        Ok(self.inner.root_recipients()?)
+    }
+
+    pub fn set_root_recipients(&self, text: String) -> Result<(), StoreError> {
+        Ok(self.inner.set_root_recipients(&text)?)
+    }
+}
+
+/// What `PassStore::reencrypt_readable` rewrote, and how many entries it
+/// could not open with this device's keys and left alone.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ReencryptReport {
+    pub rewritten: Vec<String>,
+    pub skipped: u32,
+}
+
+/// A `.age-recipients` text after an edit, and how many lines changed.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RecipientsEdit {
+    pub text: String,
+    pub changed: u32,
+}
+
+/// The recipients a `.age-recipients` text lists, as age reads it.
+#[uniffi::export]
+pub fn recipients_in(text: String) -> Vec<String> {
+    pass_core::recipients::recipients_in(&text)
+}
+
+/// Append the keys the text does not list yet; everything else stays.
+#[uniffi::export]
+pub fn recipients_add(existing: String, keys: Vec<String>) -> RecipientsEdit {
+    let r = pass_core::recipients::add_recipients(&existing, &keys);
+    RecipientsEdit {
+        text: r.text,
+        changed: r.added,
+    }
+}
+
+/// Drop the lines that are exactly `key`; everything else stays.
+#[uniffi::export]
+pub fn recipients_remove(existing: String, key: String) -> RecipientsEdit {
+    let r = pass_core::recipients::remove_recipient(&existing, &key);
+    RecipientsEdit {
+        text: r.text,
+        changed: u32::from(r.removed),
+    }
+}
+
+#[uniffi::export]
+pub fn commit_message_recipients_add() -> String {
+    pass_core::git::messages::recipients_add()
+}
+
+#[uniffi::export]
+pub fn commit_message_recipients_remove() -> String {
+    pass_core::git::messages::recipients_remove()
 }
 
 // --- entry content helpers (pure functions over plaintext bytes) -------------

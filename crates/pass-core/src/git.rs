@@ -119,6 +119,14 @@ pub mod messages {
     pub fn passkey_remove(name: &str) -> String {
         format!("Remove passkey from {name}.")
     }
+    /// 2.0 rc4: a device listing its own age key in the root
+    /// `.age-recipients`, and one being taken out again.
+    pub fn recipients_add() -> String {
+        "Add this device's age key to .age-recipients.".to_string()
+    }
+    pub fn recipients_remove() -> String {
+        "Remove an age key from .age-recipients.".to_string()
+    }
     pub fn otp_add(name: &str) -> String {
         format!("Add OTP secret for {name} to store.")
     }

@@ -17,6 +17,7 @@ pub mod hotp;
 pub mod identities;
 pub mod migration;
 pub mod passkey;
+pub mod recipients;
 pub mod ssh;
 pub mod store;
 pub mod totp;

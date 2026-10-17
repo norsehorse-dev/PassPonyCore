@@ -46,6 +46,27 @@ pub fn age_generate_identity() -> GeneratedIdentity {
     }
 }
 
+/// The public key (`age1...`) of every X25519 identity in an identities
+/// file's text, in file order, read the same way `AgeEngine` loads them.
+/// 2.0 rc4: what a device lists in the store's `.age-recipients`.
+#[uniffi::export]
+pub fn age_identities_recipients(text: String) -> Vec<String> {
+    let text = Zeroizing::new(text);
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Ok(identity) = Identity::from_str(line) {
+            let r = identity.to_public().to_string();
+            if !out.contains(&r) {
+                out.push(r);
+            }
+        }
+    }
+    out
+}
+
 /// Highest scrypt work factor (log2 N) accepted when unlocking a
 /// passphrase-protected identities file. age and gopass default to 18
 /// (256 MiB of scrypt memory); each step doubles memory and time, so 20
@@ -235,6 +256,20 @@ impl AgeEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identities_recipients_lists_each_public_key_once() {
+        let a = age_generate_identity();
+        let b = age_generate_identity();
+        let text = format!(
+            "# created by PassPony\n# public key: {}\n{}\n\n{}\n{}\nnot-a-key\n",
+            a.recipient_string, a.identity_string, b.identity_string, a.identity_string
+        );
+        assert_eq!(
+            age_identities_recipients(text),
+            vec![a.recipient_string, b.recipient_string]
+        );
+    }
 
     #[test]
     fn round_trips_through_generated_identity() {

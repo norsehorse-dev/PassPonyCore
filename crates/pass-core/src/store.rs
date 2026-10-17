@@ -158,6 +158,14 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<(), StoreError> {
     }
 }
 
+/// What `Store::reencrypt_readable` did: the entries rewritten, and how
+/// many it could not open and left alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReencryptReport {
+    pub rewritten: Vec<String>,
+    pub skipped: u32,
+}
+
 pub struct Store {
     root: PathBuf,
     format: StoreFormat,
@@ -433,6 +441,57 @@ impl Store {
         Ok(targets)
     }
 
+    /// 2.0 rc4: like `reencrypt_subtree`, but an entry this device's keys
+    /// cannot open is left exactly as it is and counted, instead of
+    /// stopping the run. A phone that just joined a store can then
+    /// re-encrypt what it wrote itself, and a phone that can read
+    /// everything still rewrites everything. Any other failure stops it.
+    pub fn reencrypt_readable(
+        &self,
+        subpath: &str,
+        backend: &dyn CryptoBackend,
+    ) -> Result<ReencryptReport, StoreError> {
+        use crate::crypto::CryptoError;
+        let mut report = ReencryptReport::default();
+        for name in self.reencrypt_targets(subpath)? {
+            let file = self.entry_file(&name)?;
+            let plaintext = match backend.decrypt(&fs::read(&file)?) {
+                Ok(p) => p,
+                Err(CryptoError::DecryptionFailed) | Err(CryptoError::NoUsableKey) => {
+                    report.skipped += 1;
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+            let recipients = self
+                .resolve_recipients(&name)?
+                .encryption_recipients()?
+                .ok_or(CryptoError::NoUsableKey)?;
+            let ciphertext = backend.encrypt(&plaintext, &recipients)?;
+            atomic_write(&file, &ciphertext)?;
+            report.rewritten.push(name);
+        }
+        Ok(report)
+    }
+
+    /// The root recipients file's text (`.age-recipients` or `.gpg-id`),
+    /// or `None` when the store has none.
+    pub fn root_recipients(&self) -> Result<Option<String>, StoreError> {
+        let path = self.root.join(self.format.recipients_file_name());
+        if !path.is_file() {
+            return Ok(None);
+        }
+        Ok(Some(fs::read_to_string(path)?))
+    }
+
+    /// Replace the root recipients file, atomically.
+    pub fn set_root_recipients(&self, text: &str) -> Result<(), StoreError> {
+        atomic_write(
+            &self.root.join(self.format.recipients_file_name()),
+            text.as_bytes(),
+        )
+    }
+
     /// Resolve the recipient source for (the directory containing) `name`,
     /// walking nearest-ancestor from the entry's directory to the store root.
     /// Env overrides (`PASSWORD_STORE_KEY`, `PASSAGE_RECIPIENTS*`) are the
@@ -573,6 +632,75 @@ mod tests {
         for ok in [".", "./a", ".hidden", "a/.hidden", "a..b", "web/site"] {
             assert!(!is_sneaky_path(ok), "{ok} should be allowed");
         }
+    }
+
+    /// "Encrypts" by writing the recipient list in front of the plaintext;
+    /// decrypts only what lists `me`, like a device with one identity.
+    struct ListedBackend;
+    impl CryptoBackend for ListedBackend {
+        fn encrypt(
+            &self,
+            plaintext: &[u8],
+            recipients: &[crate::crypto::Recipient],
+        ) -> Result<Vec<u8>, crate::crypto::CryptoError> {
+            let mut out = format!("{}\n", recipients.join(",")).into_bytes();
+            out.extend_from_slice(plaintext);
+            Ok(out)
+        }
+        fn decrypt(
+            &self,
+            ciphertext: &[u8],
+        ) -> Result<zeroize::Zeroizing<Vec<u8>>, crate::crypto::CryptoError> {
+            let split = ciphertext.iter().position(|b| *b == b'\n').unwrap();
+            let listed = std::str::from_utf8(&ciphertext[..split]).unwrap();
+            if !listed.split(',').any(|r| r == "me") {
+                return Err(crate::crypto::CryptoError::DecryptionFailed);
+            }
+            Ok(zeroize::Zeroizing::new(ciphertext[split + 1..].to_vec()))
+        }
+    }
+
+    #[test]
+    fn reencrypt_readable_skips_what_this_device_cannot_open() {
+        let dir = std::env::temp_dir().join(format!("passpony-rc4-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir, StoreFormat::Passage).unwrap();
+        assert_eq!(store.root_recipients().unwrap(), None);
+
+        store.set_root_recipients("me\n").unwrap();
+        store
+            .write_entry(
+                "mine",
+                &crate::entry::Entry::from_bytes(b"pw1\n".to_vec()),
+                &ListedBackend,
+            )
+            .unwrap();
+        store.set_root_recipients("other\n").unwrap();
+        store
+            .write_entry(
+                "theirs",
+                &crate::entry::Entry::from_bytes(b"pw2\n".to_vec()),
+                &ListedBackend,
+            )
+            .unwrap();
+
+        store.set_root_recipients("me\nother\n").unwrap();
+        assert_eq!(
+            store.root_recipients().unwrap().as_deref(),
+            Some("me\nother\n")
+        );
+        let report = store.reencrypt_readable("", &ListedBackend).unwrap();
+        assert_eq!(report.rewritten, vec!["mine".to_string()]);
+        assert_eq!(report.skipped, 1);
+        let mine = std::fs::read(dir.join("mine.age")).unwrap();
+        assert!(mine.starts_with(b"me,other\n"));
+        let theirs = std::fs::read(dir.join("theirs.age")).unwrap();
+        assert!(
+            theirs.starts_with(b"other\n"),
+            "an unreadable entry is left as it was"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
