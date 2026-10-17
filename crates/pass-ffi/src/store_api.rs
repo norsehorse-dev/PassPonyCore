@@ -312,6 +312,10 @@ pub enum TotpError {
     BadAlgorithm { name: String },
     #[error("invalid number: {detail}")]
     BadNumber { detail: String },
+    #[error("not an otpauth:// hotp URI")]
+    NotHotpUri,
+    #[error("hotp URI has no counter")]
+    MissingCounter,
 }
 
 impl From<pass_core::totp::TotpError> for TotpError {
@@ -323,6 +327,8 @@ impl From<pass_core::totp::TotpError> for TotpError {
             E::BadSecret => TotpError::BadSecret,
             E::BadAlgorithm(name) => TotpError::BadAlgorithm { name },
             E::BadNumber(detail) => TotpError::BadNumber { detail },
+            E::NotHotpUri => TotpError::NotHotpUri,
+            E::MissingCounter => TotpError::MissingCounter,
         }
     }
 }

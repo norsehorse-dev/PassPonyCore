@@ -298,5 +298,32 @@ for entry in appended replaced insert-only; do
 done
 golden "$FIX/pass/otp/goldens/otp-uri" base pass otp uri base
 
+# hotp: pass-otp's counter-based codes. `pass otp code` on an hotp URI
+# computes the code at counter+1 and rewrites the entry with that counter,
+# so the stored counter is the last one used. Goldens: the two codes the
+# extension printed, the entry after both (counter=2), and the commit
+# subject it writes. The commit subject comes from a throwaway git-backed
+# store outside fixtures/, since the fixture stores are not repos.
+OTP_URI_H='otpauth://hotp/Example:kevin?secret=JBSWY3DPEHPK3PXP&counter=0&issuer=Example'
+pass_fixture hotp
+pass init "$GPG_FPR_A" >/dev/null
+echo "$OTP_URI_H" | pass otp insert counter >/dev/null
+golden "$FIX/pass/hotp/goldens/code" first pass otp code counter
+golden "$FIX/pass/hotp/goldens/code" second pass otp code counter
+pass_goldens hotp counter
+HOTP_GIT="$TOOLS/hotp-git"
+rm -rf "$HOTP_GIT"
+(
+  export PASSWORD_STORE_DIR="$HOTP_GIT"
+  export GIT_AUTHOR_NAME="PassPony Fixtures" GIT_AUTHOR_EMAIL="fixtures@passpony.test"
+  export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME" GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+  pass init "$GPG_FPR_A" >/dev/null
+  pass git init >/dev/null
+  echo "$OTP_URI_H" | pass otp insert web/counter >/dev/null
+  pass otp code web/counter >/dev/null
+  golden "$FIX/pass/hotp/goldens" commit-subject git -C "$HOTP_GIT" log -1 --format=%s
+)
+rm -rf "$HOTP_GIT"
+
 echo "Corpus generated under $FIX"
 find "$FIX/pass" "$FIX/passage" -name "*.gpg" -o -name "*.age" | wc -l

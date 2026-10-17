@@ -55,18 +55,6 @@ pub fn age_generate_identity() -> GeneratedIdentity {
 /// is not a safe ask on a phone.
 const MAX_IDENTITIES_SCRYPT_LOG_N: u8 = 20;
 
-const AGE_BINARY_MAGIC: &[u8] = b"age-encryption.org/v1";
-const AGE_ARMOR_MAGIC: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----";
-
-/// True when `data` looks like an age-encrypted file (binary header or
-/// ASCII armor) rather than a plaintext identities file. A cheap prefix
-/// check, not a parse: it only decides whether to ask for a passphrase.
-#[uniffi::export]
-pub fn age_is_encrypted_identities_file(data: Vec<u8>) -> bool {
-    let data = data.trim_ascii_start();
-    data.starts_with(AGE_BINARY_MAGIC) || data.starts_with(AGE_ARMOR_MAGIC)
-}
-
 /// Decrypts a passphrase-protected (scrypt) age identities file, as
 /// written by `age -p` or gopass's age backend, binary or armored, and
 /// returns the plaintext identities text as bytes so the caller can
@@ -85,13 +73,49 @@ pub fn age_decrypt_identities_file(
     decrypt_identities_file(data, passphrase, MAX_IDENTITIES_SCRYPT_LOG_N)
 }
 
+/// Decrypts any passphrase-protected age file, binary or armored, with the
+/// same scrypt work-factor cap as identities files. Used for `.passpony`
+/// backups; see `docs/BACKUP.md`.
+#[uniffi::export]
+pub fn age_decrypt_with_passphrase(
+    data: Vec<u8>,
+    passphrase: String,
+) -> Result<Vec<u8>, CryptoError> {
+    decrypt_identities_file(data, passphrase, MAX_IDENTITIES_SCRYPT_LOG_N)
+}
+
+/// Encrypts `plaintext` to a passphrase as a binary age v1 file with a
+/// single scrypt recipient at age's default work factor (log2 N = 18, the
+/// same as `age -p`), so any age implementation can open it. Used for
+/// `.passpony` backups.
+#[uniffi::export]
+pub fn age_encrypt_with_passphrase(
+    plaintext: Vec<u8>,
+    passphrase: String,
+) -> Result<Vec<u8>, CryptoError> {
+    let plaintext = Zeroizing::new(plaintext);
+    let recipient = scrypt::Recipient::new(SecretString::from(passphrase));
+    let encryptor = Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
+        .map_err(|_| CryptoError::EncryptionFailed)?;
+    let mut out = Vec::new();
+    let mut writer = encryptor
+        .wrap_output(&mut out)
+        .map_err(|_| CryptoError::EncryptionFailed)?;
+    writer
+        .write_all(&plaintext)
+        .map_err(|_| CryptoError::EncryptionFailed)?;
+    writer.finish().map_err(|_| CryptoError::EncryptionFailed)?;
+    Ok(out)
+}
+
 fn decrypt_identities_file(
     data: Vec<u8>,
     passphrase: String,
     max_log_n: u8,
 ) -> Result<Vec<u8>, CryptoError> {
     let passphrase = SecretString::from(passphrase);
-    // Same leading-whitespace tolerance as `age_is_encrypted_identities_file`,
+    // Same leading-whitespace tolerance as `age_is_encrypted_identities_file`
+    // (pass_core::identities::is_age_encrypted),
     // so a file detected as encrypted is also one the reader accepts.
     let decryptor = Decryptor::new(ArmoredReader::new(data.trim_ascii_start()))
         .map_err(|_| CryptoError::DecryptionFailed)?;
@@ -480,23 +504,39 @@ mod tests {
 
     #[test]
     fn encrypted_identities_detection() {
-        assert!(age_is_encrypted_identities_file(passphrase_fixture(
+        assert!(crate::age_is_encrypted_identities_file(passphrase_fixture(
             "identities.binary"
         )));
-        assert!(age_is_encrypted_identities_file(passphrase_fixture(
+        assert!(crate::age_is_encrypted_identities_file(passphrase_fixture(
             "identities"
         )));
         let mut padded = b"\n  ".to_vec();
         padded.extend(passphrase_fixture("identities"));
-        assert!(age_is_encrypted_identities_file(padded));
+        assert!(crate::age_is_encrypted_identities_file(padded));
 
         // Plaintext identities (with and without comments) pass through.
-        assert!(!age_is_encrypted_identities_file(passphrase_fixture(
-            "identities.plain"
-        )));
-        assert!(!age_is_encrypted_identities_file(
+        assert!(!crate::age_is_encrypted_identities_file(
+            passphrase_fixture("identities.plain")
+        ));
+        assert!(!crate::age_is_encrypted_identities_file(
             b"AGE-SECRET-KEY-1ABC\n".to_vec()
         ));
-        assert!(!age_is_encrypted_identities_file(Vec::new()));
+        assert!(!crate::age_is_encrypted_identities_file(Vec::new()));
+    }
+
+    #[test]
+    fn passphrase_encrypt_round_trips_and_is_plain_age() {
+        let ct = age_encrypt_with_passphrase(b"PassPony backup 1\nend\n".to_vec(), "AB-CD".into())
+            .unwrap();
+        assert!(ct.starts_with(b"age-encryption.org/v1\n-> scrypt "));
+        assert!(crate::age_is_encrypted_identities_file(ct.clone()));
+        assert_eq!(
+            age_decrypt_with_passphrase(ct.clone(), "AB-CD".into()).unwrap(),
+            b"PassPony backup 1\nend\n"
+        );
+        assert!(matches!(
+            age_decrypt_with_passphrase(ct, "nope".into()),
+            Err(CryptoError::DecryptionFailed)
+        ));
     }
 }

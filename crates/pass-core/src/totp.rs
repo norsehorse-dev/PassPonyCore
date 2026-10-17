@@ -30,6 +30,10 @@ pub enum TotpError {
     BadAlgorithm(String),
     #[error("invalid numeric parameter: {0}")]
     BadNumber(String),
+    #[error("not an otpauth:// hotp URI")]
+    NotHotpUri,
+    #[error("hotp URI has no counter")]
+    MissingCounter,
 }
 
 impl TotpAlgorithm {
@@ -198,7 +202,7 @@ impl Totp {
     }
 }
 
-fn hotp(secret: &[u8], counter: u64, algorithm: TotpAlgorithm, digits: u32) -> String {
+pub(crate) fn hotp(secret: &[u8], counter: u64, algorithm: TotpAlgorithm, digits: u32) -> String {
     let msg = counter.to_be_bytes();
     let digest: Vec<u8> = match algorithm {
         TotpAlgorithm::Sha1 => {
@@ -241,7 +245,7 @@ pub fn validate_secret(input: &str) -> Result<usize, TotpError> {
 }
 
 /// RFC 4648 base32, upper-case, no padding.
-fn encode_base32(input: &[u8]) -> String {
+pub(crate) fn encode_base32(input: &[u8]) -> String {
     const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     let mut out = String::with_capacity(input.len().div_ceil(5) * 8);
     let mut bits: u64 = 0;
@@ -262,7 +266,7 @@ fn encode_base32(input: &[u8]) -> String {
 
 /// RFC 4648 base32, tolerant: case-insensitive, ignores whitespace and `-`,
 /// padding optional.
-fn decode_base32(input: &str) -> Result<Vec<u8>, TotpError> {
+pub(crate) fn decode_base32(input: &str) -> Result<Vec<u8>, TotpError> {
     let mut bits: u64 = 0;
     let mut nbits: u32 = 0;
     let mut out = Vec::new();
@@ -287,7 +291,7 @@ fn decode_base32(input: &str) -> Result<Vec<u8>, TotpError> {
 }
 
 /// Minimal percent-decoding for labels/issuers; invalid escapes pass through.
-fn percent_decode(s: &str) -> String {
+pub(crate) fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -318,7 +322,7 @@ fn hex_val(b: u8) -> Option<u8> {
 /// (RFC 3986) plus `:` and `@` stay literal, since `Issuer:account` and mail
 /// style account names are the norm in labels and both are legal in a query
 /// value; everything else, spaces and non-ASCII included, is escaped.
-fn percent_encode(s: &str) -> String {
+pub(crate) fn percent_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         match b {

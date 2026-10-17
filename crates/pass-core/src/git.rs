@@ -69,6 +69,14 @@ pub mod messages {
     pub fn configure() -> String {
         "Configure git repository for age file diff.".to_string()
     }
+    /// `pass otp code` on an HOTP entry.
+    pub fn hotp_increment(name: &str) -> String {
+        format!("Increment HOTP counter for {name}.")
+    }
+    /// `pass otp insert` on a new entry.
+    pub fn otp_add(name: &str) -> String {
+        format!("Add OTP secret for {name} to store.")
+    }
     pub fn resolve_keep_both(name: &str) -> String {
         format!("Keep both versions of {name} after sync conflict.")
     }

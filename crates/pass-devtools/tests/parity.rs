@@ -287,6 +287,40 @@ fn otpauth_operations_match_pass_otp() {
     assert_eq!(e.to_bytes(), insert_only.as_slice(), "line 1 refused");
 }
 
+/// pass-otp's HOTP behavior (fixtures/pass/hotp): starting from the URI
+/// `pass otp insert` stored with counter=0, two advances must print the
+/// same two codes `pass otp code` printed, leave the entry byte-identical to
+/// what the extension wrote back (counter=2), and use its commit subject.
+#[test]
+fn hotp_advance_matches_pass_otp() {
+    use pass_core::entry::Entry;
+    use pass_core::hotp::advance_entry;
+
+    let fx = fixtures_root().join("pass/hotp");
+    let golden = |name: &str| {
+        String::from_utf8(fs::read(fx.join(format!("goldens/{name}.out"))).unwrap()).unwrap()
+    };
+    let start = "otpauth://hotp/Example:kevin?secret=JBSWY3DPEHPK3PXP&counter=0&issuer=Example\n";
+    let mut e = Entry::from_bytes(start.as_bytes().to_vec());
+    let first = advance_entry(&mut e).unwrap();
+    let second = advance_entry(&mut e).unwrap();
+    assert_eq!(first.code, golden("code/first").trim());
+    assert_eq!(second.code, golden("code/second").trim());
+    assert_eq!(second.counter, 2);
+    assert_eq!(e.to_bytes(), golden("show/counter").as_bytes());
+    assert_eq!(
+        pass_core::git::messages::hotp_increment("web/counter"),
+        golden("commit-subject").trim()
+    );
+
+    let store = Store::open(fx.join("store"), StoreFormat::Pass).unwrap();
+    let backend = GpgCliBackend {
+        gnupghome: Some(test_gnupghome()),
+    };
+    let stored = store.read_entry("counter", &backend).unwrap();
+    assert_eq!(stored.to_bytes(), e.to_bytes());
+}
+
 #[test]
 fn file_beats_directory_on_show() {
     let fx = fixtures_root().join("passage/collision");
