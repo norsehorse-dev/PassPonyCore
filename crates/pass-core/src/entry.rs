@@ -210,6 +210,55 @@ impl Entry {
         self.raw.push(b'\n');
     }
 
+    /// Append a `key: value` line even when the key already exists (a second
+    /// passkey is a second line). Existing bytes stay an exact prefix; a
+    /// missing final newline is supplied first, as in `set_field`.
+    pub fn append_field(&mut self, key: &str, value: &str) {
+        if !self.raw.is_empty() && !self.raw.ends_with(b"\n") {
+            self.raw.push(b'\n');
+        }
+        self.raw.extend_from_slice(key.as_bytes());
+        self.raw.extend_from_slice(b": ");
+        self.raw.extend_from_slice(value.as_bytes());
+        self.raw.push(b'\n');
+    }
+
+    /// Remove the first field line after line 1 whose key is `key` and
+    /// whose value satisfies `matches`, together with its line ending.
+    /// Returns false and leaves the bytes untouched when nothing matches.
+    /// Line 1 is the password and is never removed.
+    pub fn remove_field_where(&mut self, key: &str, matches: impl Fn(&str) -> bool) -> bool {
+        let mut offset = 0usize;
+        let mut line_no = 0usize;
+        let raw_len = self.raw.len();
+        while offset < raw_len {
+            let end = self.raw[offset..]
+                .iter()
+                .position(|&b| b == b'\n')
+                .map(|i| offset + i)
+                .unwrap_or(raw_len);
+            if line_no > 0 {
+                if let Ok(text) = std::str::from_utf8(&self.raw[offset..end]) {
+                    let text = text.strip_suffix('\r').unwrap_or(text);
+                    if let Some((k, v)) = text.split_once(':') {
+                        let v = v.strip_prefix(' ').unwrap_or(v);
+                        if !text.starts_with("otpauth://") && k.trim_end() == key && matches(v) {
+                            let stop = if end < raw_len { end + 1 } else { end };
+                            self.raw.drain(offset..stop);
+                            return true;
+                        }
+                    }
+                }
+            }
+            if end == raw_len {
+                break;
+            }
+            offset = end + 1;
+            line_no += 1;
+        }
+        false
+    }
+
     /// Byte range of the first `otpauth://` line's text: from the line start
     /// up to, but not including, its `\n` and any `\r` right before it.
     fn otpauth_span(&self) -> Option<(usize, usize)> {
@@ -240,6 +289,33 @@ impl Entry {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn append_field_keeps_existing_lines() {
+        let mut e = Entry::from_bytes(b"pw\npasskey: a".to_vec());
+        e.append_field("passkey", "b");
+        assert_eq!(e.to_bytes(), b"pw\npasskey: a\npasskey: b\n");
+        let mut empty_password = Entry::from_bytes(b"\n".to_vec());
+        empty_password.append_field("passkey", "c");
+        assert_eq!(empty_password.password(), b"");
+        assert_eq!(empty_password.to_bytes(), b"\npasskey: c\n");
+    }
+
+    #[test]
+    fn remove_field_where_touches_one_line_only() {
+        let mut e = Entry::from_bytes(b"pw\r\npasskey: a\r\npasskey: b\r\nurl: x\r\n".to_vec());
+        assert!(e.remove_field_where("passkey", |v| v == "b"));
+        assert_eq!(e.to_bytes(), b"pw\r\npasskey: a\r\nurl: x\r\n");
+        assert!(!e.remove_field_where("passkey", |v| v == "zzz"));
+        let mut first = Entry::from_bytes(b"passkey: a\n".to_vec());
+        assert!(
+            !first.remove_field_where("passkey", |_| true),
+            "line 1 is the password"
+        );
+        let mut last = Entry::from_bytes(b"pw\npasskey: a".to_vec());
+        assert!(last.remove_field_where("passkey", |_| true));
+        assert_eq!(last.to_bytes(), b"pw\n");
+    }
     use super::*;
 
     const URI: &str = "otpauth://totp/Example:kevin?secret=JBSWY3DPEHPK3PXP&issuer=Example";

@@ -113,6 +113,12 @@ pub mod messages {
         format!("Increment HOTP counter for {name}.")
     }
     /// `pass otp insert` on a new entry.
+    pub fn passkey_add(name: &str) -> String {
+        format!("Add passkey to {name}.")
+    }
+    pub fn passkey_remove(name: &str) -> String {
+        format!("Remove passkey from {name}.")
+    }
     pub fn otp_add(name: &str) -> String {
         format!("Add OTP secret for {name} to store.")
     }

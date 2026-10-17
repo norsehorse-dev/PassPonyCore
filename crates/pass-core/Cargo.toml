@@ -23,15 +23,12 @@ getrandom = "0.4"
 # runs here (libssh2 signs), so the rsa feature stays off.
 ssh-key = { version = "0.6.7", default-features = false, features = ["std", "ecdsa", "ed25519", "encryption", "getrandom"] }
 
-# Passkey line format spike (passkey.rs, PassPonyAndroid P21): CXF passkey
-# objects as base64url JSON. Optional and off by default so the phone builds
-# carry none of it until the passkey release wires it up.
-serde = { version = "1", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
-base64 = { version = "0.21", optional = true }
-
-[features]
-passkey = ["dep:serde", "dep:serde_json", "dep:base64"]
+# Passkeys (2.0 rc3): CXF passkey objects as base64url JSON in an entry line
+# (passkey.rs), and the WebAuthn byte builders and JSON the two platform
+# providers share (webauthn.rs). ES256 signing stays platform side.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.21"
 
 # Mobile targets have no system OpenSSL to link against; build it from source
 # there. Desktop/CI keep linking the system library.
@@ -47,3 +44,8 @@ openssl-sys = { version = "0.9", features = ["vendored"] }
 openssl = "0.10"
 libgit2-sys = "0.18.7"
 foreign-types-shared = "0.1"  # ForeignType trait for X509::as_ptr
+
+[dev-dependencies]
+# Test-only: stands in for the platform signer so the WebAuthn tests can
+# check real ES256 signatures over the bytes the core builds.
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }

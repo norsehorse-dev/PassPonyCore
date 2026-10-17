@@ -41,6 +41,14 @@ Status: living document, present from P0. Expand as surfaces land.
   means the server was rebuilt, rekeyed, or something is in the middle.
   Diagnostics reports only whether a remote is SSH and whether its host is
   pinned, never the key, the fingerprint, or the URL's user.
+- Passkeys (2.0) live inside the encrypted entry as one `passkey:` line
+  each, so they are covered by the same encryption, sync and backups as
+  the password. They are software keys, never hardware bound: a key that
+  could not leave the device could not follow the store to the next one.
+  The signature counter is always 0. User verification is the app's unlock
+  gate. On Android only browsers on the bundled privileged list are served;
+  a native app's request is declined, because confirming an app's claim on
+  a site would need a network fetch to that site.
 - FLAG_SECURE / screenshot suppression on reveal and passphrase screens.
 - Panic-lock action clears all cached secrets immediately.
 - An `otpauth://` URI is a secret like the password line: the core hands it

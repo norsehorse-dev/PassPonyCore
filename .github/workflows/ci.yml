@@ -55,14 +55,8 @@ jobs:
       - name: Test pass-ffi with the age-engine feature
         run: cargo test --locked -p pass-ffi --features age-engine
 
-      - name: Test pass-core with the passkey feature (format spike)
-        run: cargo test --locked -p pass-core --features passkey
-
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
-
-      - name: Clippy (passkey feature)
-        run: cargo clippy --locked -p pass-core --features passkey --all-targets -- -D warnings
 
       - name: Clippy (age-engine feature)
         run: cargo clippy --locked -p pass-ffi --features age-engine --all-targets -- -D warnings

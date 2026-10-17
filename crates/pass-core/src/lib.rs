@@ -16,11 +16,11 @@ pub mod git;
 pub mod hotp;
 pub mod identities;
 pub mod migration;
-pub mod ssh;
-#[cfg(feature = "passkey")]
 pub mod passkey;
+pub mod ssh;
 pub mod store;
 pub mod totp;
+pub mod webauthn;
 
 /// Version of the core library, surfaced through FFI for diagnostics.
 pub fn core_version() -> String {

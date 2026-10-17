@@ -2,7 +2,8 @@
 
 **Project:** PassPony (PassPonyCore, iOS, Android)
 **Date:** 2026-08-29
-**Status:** design spike, PassPony 1.1 packet P21. Nothing here ships in 1.1.
+**Status:** design spike, PassPony 1.1 packet P21. Built in 2.0 rc3; see
+"What 2.0 built" at the end for where the release departs from this memo.
 **Question:** How would a WebAuthn credential (a passkey) live inside a pass or
 passage entry so both phones can use it, and what does a passkey release cost?
 
@@ -222,6 +223,27 @@ the Android native-app decision made before its packets are cut.
   extensions, which the first release will not.
 - Whether the desktop consumes the format read-only at first (show that an
   entry carries a passkey) or not at all.
+
+## What 2.0 built
+
+- The format above, unchanged, now compiled into every build (`passkey.rs`
+  no longer sits behind a feature).
+- `webauthn.rs`: authenticator data, the COSE key, the `none` attestation
+  object, the SPKI Android wants, and Android's request and response JSON,
+  with tests that verify real ES256 signatures over the built bytes.
+- The codec gained `append_field` and `remove_field_where`; passkeys are
+  added and removed one line at a time.
+- Signing is platform side as recommended, but without a callback trait:
+  a registration takes the platform's PKCS#8 key and public coordinates,
+  and an assertion returns the bytes to sign. Nothing calls back into the
+  app.
+- Android native apps: declined (browsers only), decided in the 2.0 plan.
+  A request counts as a browser request only when the calling app is on
+  the bundled privileged-browser allowlist, which is what makes
+  `CallingAppInfo.getOrigin()` return an origin. The provider does not add
+  its own origin-to-rpId check on top: the browser has already enforced
+  the WebAuthn rules, and Android's guidance is that a provider-side check
+  breaks Related Origin Requests.
 
 ## Sources
 
