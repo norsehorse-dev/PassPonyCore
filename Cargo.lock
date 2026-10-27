@@ -1898,7 +1898,7 @@ dependencies = [
 
 [[package]]
 name = "pass-core"
-version = "1.1.0"
+version = "2.1.0"
 dependencies = [
  "base64",
  "foreign-types-shared",
@@ -1920,7 +1920,7 @@ dependencies = [
 
 [[package]]
 name = "pass-devtools"
-version = "1.1.0"
+version = "2.1.0"
 dependencies = [
  "git2",
  "pass-core",
@@ -1929,7 +1929,7 @@ dependencies = [
 
 [[package]]
 name = "pass-ffi"
-version = "1.1.0"
+version = "2.1.0"
 dependencies = [
  "age",
  "pass-core",
