@@ -61,6 +61,16 @@ jobs:
       - name: Clippy (age-engine feature)
         run: cargo clippy --locked -p pass-ffi --features age-engine --all-targets -- -D warnings
 
+      # pgp-engine (rpgp for pass stores) is iOS-only, off by default like
+      # age-engine, so it needs its own coverage. Its tests decrypt real
+      # GnuPG output from fixtures/pgp-engine (RSA, locked RSA, subkeys-only
+      # export, AEAD/OCB) and round-trip encrypt.
+      - name: Test pass-ffi with the pgp-engine feature
+        run: cargo test --locked -p pass-ffi --features pgp-engine
+
+      - name: Clippy (pgp-engine feature)
+        run: cargo clippy --locked -p pass-ffi --features pgp-engine --all-targets -- -D warnings
+
       - name: Format
         run: cargo fmt --check
 
