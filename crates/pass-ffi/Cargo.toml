@@ -26,9 +26,18 @@ zeroize = "1"
 # binary age files.
 age = { version = "0.11", default-features = false, features = ["armor"], optional = true }
 
+# iOS-only Rust OpenPGP engine for pass stores (see pgp_engine.rs): the
+# keys and messages NorseHorsePGPCore can't handle (RSA, NIST curves,
+# GnuPG's AEAD packets). Android has BouncyCastle and leaves this off, so
+# its build surface and reproducible .so are unchanged.
+pgp = { version = "=0.20.0", optional = true }
+rand = { version = "0.8", optional = true }
+rsa = { version = "0.9", optional = true }
+
 [features]
 cli = ["uniffi/cli"]
 age-engine = ["dep:age"]
+pgp-engine = ["dep:pgp", "dep:rand", "dep:rsa"]
 
 [[bin]]
 name = "uniffi-bindgen"

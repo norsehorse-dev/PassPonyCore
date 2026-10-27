@@ -1,0 +1,13 @@
+# off=0 ctb=84 tag=1 hlen=2 plen=94
+:pubkey enc packet: version 3, algo 18, keyid CDF7E8735EFE6F59
+	data: [263 bits]
+	data: [392 bits]
+# off=96 ctb=d4 tag=20 hlen=2 plen=138 new-ctb
+:aead encrypted packet: cipher=9 aead=2 cb=16
+	length: 138
+# off=117 ctb=a3 tag=8 hlen=1 plen=0 indeterminate
+:compressed packet: algo=2
+# off=119 ctb=cb tag=11 hlen=2 plen=75 new-ctb
+:literal data packet:
+	mode b (62), created 1793060900, name="",
+	raw data: 69 bytes

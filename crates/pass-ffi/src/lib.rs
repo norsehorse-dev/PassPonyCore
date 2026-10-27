@@ -31,6 +31,15 @@ mod age_engine;
 #[cfg(feature = "age-engine")]
 pub use age_engine::*;
 
+// iOS-only Rust OpenPGP engine for pass stores: RSA and the other keys
+// and packets NorseHorsePGPCore can't read. Off by default, so Android's
+// FFI surface and reproducible .so are unchanged; iOS's build-core.sh
+// turns it on.
+#[cfg(feature = "pgp-engine")]
+mod pgp_engine;
+#[cfg(feature = "pgp-engine")]
+pub use pgp_engine::*;
+
 uniffi::setup_scaffolding!();
 
 /// Point the git transport's OpenSSL at a CA bundle.
