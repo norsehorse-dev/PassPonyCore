@@ -61,6 +61,16 @@ jobs:
       - name: Clippy (age-engine feature)
         run: cargo clippy --locked -p pass-ffi --features age-engine --all-targets -- -D warnings
 
+      # age-pq adds age's post-quantum keys (age1pq1...) to the age engine.
+      # Off by default and not shipped yet. Its tests run the upstream age
+      # vectors in fixtures/age-pq, and age-engine alone is tested above to
+      # show the engine without it is unchanged.
+      - name: Test pass-ffi with the age-pq feature
+        run: cargo test --locked -p pass-ffi --features age-pq
+
+      - name: Clippy (age-pq feature)
+        run: cargo clippy --locked -p pass-ffi --features age-pq --all-targets -- -D warnings
+
       # pgp-engine (rpgp for pass stores) is iOS-only, off by default like
       # age-engine, so it needs its own coverage. Its tests decrypt real
       # GnuPG output from fixtures/pgp-engine (RSA, locked RSA, subkeys-only
