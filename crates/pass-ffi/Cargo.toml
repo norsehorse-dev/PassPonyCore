@@ -24,7 +24,7 @@ zeroize = "1"
 # The `armor` feature is only for reading ASCII-armored passphrase-protected
 # identities files (see age_decrypt_identities_file); stores themselves are
 # binary age files.
-age = { version = "0.11", default-features = false, features = ["armor"], optional = true }
+age = { version = "0.12", default-features = false, features = ["armor"], optional = true }
 
 # iOS-only Rust OpenPGP engine for pass stores (see pgp_engine.rs): the
 # keys and messages NorseHorsePGPCore can't handle (RSA, NIST curves,
