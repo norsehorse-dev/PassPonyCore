@@ -13,6 +13,7 @@
 //! - errors never carry entry names or plaintext, only the FFI's
 //!   existing CryptoError variants.
 
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -196,24 +197,20 @@ impl AgeEngine {
             return Err(CryptoError::NoUsableKey);
         }
 
-        let targets: Vec<X25519Recipient> = if recipients.is_empty() {
-            self.identities.iter().map(Identity::to_public).collect()
+        let targets: Vec<Box<dyn age::Recipient>> = if recipients.is_empty() {
+            self.identities
+                .iter()
+                .map(|i| Box::new(i.to_public()) as Box<dyn age::Recipient>)
+                .collect()
         } else {
             let mut parsed = Vec::with_capacity(recipients.len());
             for spec in &recipients {
-                match X25519Recipient::from_str(spec) {
-                    Ok(r) => parsed.push(r),
-                    // Matches AgePonyEngine.swift: any parse failure
-                    // collapses to a generic EncryptionFailed rather
-                    // than naming the bad recipient in the error.
-                    Err(_) => return Err(CryptoError::EncryptionFailed),
-                }
+                parsed.push(parse_recipient(spec)?);
             }
             parsed
         };
 
-        let refs: Vec<&dyn age::Recipient> =
-            targets.iter().map(|r| r as &dyn age::Recipient).collect();
+        let refs: Vec<&dyn age::Recipient> = targets.iter().map(|r| r.as_ref()).collect();
         let encryptor = Encryptor::with_recipients(refs.into_iter())
             .map_err(|_| CryptoError::EncryptionFailed)?;
 
@@ -253,9 +250,87 @@ impl AgeEngine {
     }
 }
 
+/// One `.age-recipients` line: an X25519 key, or a YubiKey key that
+/// age-plugin-yubikey made (`age1yubikey1...`), which encrypting to
+/// needs neither the plugin nor the key. Matches AgePonyEngine.swift:
+/// any parse failure collapses to a generic EncryptionFailed rather
+/// than naming the bad recipient in the error.
+fn parse_recipient(spec: &str) -> Result<Box<dyn age::Recipient>, CryptoError> {
+    if pass_age_piv::is_piv_recipient(spec) {
+        pass_age_piv::PivRecipient::from_str(spec)
+            .map(|r| Box::new(YubiKeyRecipient(r)) as Box<dyn age::Recipient>)
+            .map_err(|_| CryptoError::EncryptionFailed)
+    } else {
+        X25519Recipient::from_str(spec)
+            .map(|r| Box::new(r) as Box<dyn age::Recipient>)
+            .map_err(|_| CryptoError::EncryptionFailed)
+    }
+}
+
+/// [`pass_age_piv::PivRecipient`] as an age 0.11 recipient: one
+/// `piv-p256` stanza, no labels (it mixes with X25519, as with the
+/// plugin).
+struct YubiKeyRecipient(pass_age_piv::PivRecipient);
+
+impl age::Recipient for YubiKeyRecipient {
+    fn wrap_file_key(
+        &self,
+        file_key: &age_core::format::FileKey,
+    ) -> Result<(Vec<age_core::format::Stanza>, HashSet<String>), age::EncryptError> {
+        let s = self.0.wrap(file_key.expose_secret());
+        Ok((
+            vec![age_core::format::Stanza {
+                tag: pass_age_piv::STANZA_TAG.to_owned(),
+                args: s.args(),
+                body: s.body(),
+            }],
+            HashSet::new(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A store whose recipients mix a YubiKey and this device: the
+    /// device can still save, and still read what it saved. The YubiKey
+    /// stanza itself is checked against age-plugin-yubikey in
+    /// pass-age-piv's tests.
+    #[test]
+    fn encrypts_to_yubikey_and_x25519_recipients() {
+        use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+
+        let me = age_generate_identity();
+        let sk = p256::SecretKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+        let yk = pass_age_piv::PivRecipient::from_compressed(
+            sk.public_key().to_encoded_point(true).as_bytes(),
+        )
+        .unwrap();
+        let engine = AgeEngine::from_identities_text(me.identity_string.clone());
+
+        let plaintext = b"shared with the yubikey\n".to_vec();
+        let ciphertext = engine
+            .encrypt(
+                plaintext.clone(),
+                vec![yk.to_string(), me.recipient_string.clone()],
+            )
+            .expect("encrypt to a yubikey and an x25519 recipient");
+        assert!(ciphertext
+            .windows(b"-> piv-p256 ".len())
+            .any(|w| w == b"-> piv-p256 "));
+        assert_eq!(engine.decrypt(ciphertext).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn malformed_yubikey_recipient_reports_encryption_failed() {
+        let a = age_generate_identity();
+        let engine = AgeEngine::from_identities_text(a.identity_string);
+        let err = engine
+            .encrypt(b"x".to_vec(), vec!["age1yubikey1qqqqqq".to_owned()])
+            .unwrap_err();
+        assert!(matches!(err, CryptoError::EncryptionFailed));
+    }
 
     #[test]
     fn identities_recipients_lists_each_public_key_once() {

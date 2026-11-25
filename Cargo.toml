@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/pass-core", "crates/pass-ffi", "crates/pass-devtools"]
+members = ["crates/pass-core", "crates/pass-ffi", "crates/pass-devtools", "crates/pass-age-piv"]
 resolver = "2"
 
 [workspace.package]

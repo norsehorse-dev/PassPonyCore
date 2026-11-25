@@ -25,6 +25,10 @@ zeroize = "1"
 # identities files (see age_decrypt_identities_file); stores themselves are
 # binary age files.
 age = { version = "0.11", default-features = false, features = ["armor"], optional = true }
+age-core = { version = "0.11", optional = true }
+# YubiKey (age-plugin-yubikey) recipients, so a store whose recipients
+# include age1yubikey1... keys can still be written to.
+pass-age-piv = { path = "../pass-age-piv", optional = true }
 
 # iOS-only Rust OpenPGP engine for pass stores (see pgp_engine.rs): the
 # keys and messages NorseHorsePGPCore can't handle (RSA, NIST curves,
@@ -34,9 +38,12 @@ pgp = { version = "=0.20.0", optional = true }
 rand = { version = "0.8", optional = true }
 rsa = { version = "0.9", optional = true }
 
+[dev-dependencies]
+p256 = "0.13"
+
 [features]
 cli = ["uniffi/cli"]
-age-engine = ["dep:age"]
+age-engine = ["dep:age", "dep:age-core", "dep:pass-age-piv"]
 pgp-engine = ["dep:pgp", "dep:rand", "dep:rsa"]
 
 [[bin]]

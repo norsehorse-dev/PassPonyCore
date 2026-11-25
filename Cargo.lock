@@ -54,8 +54,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "047a482d1843edf1ce76ada63183698144030fe1191bd5ddba6e41e164e0bc43"
 dependencies = [
  "age-core",
- "base64",
- "bech32",
+ "base64 0.21.7",
+ "bech32 0.9.1",
  "chacha20poly1305",
  "cookie-factory",
  "hmac",
@@ -79,7 +79,7 @@ version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2bf6a89c984ca9d850913ece2da39e1d200563b0a94b002b253beee4c5acf99"
 dependencies = [
- "base64",
+ "base64 0.21.7",
  "chacha20poly1305",
  "cookie-factory",
  "hkdf",
@@ -196,6 +196,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
 
 [[package]]
+name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
 name = "base64ct"
 version = "1.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -226,6 +232,12 @@ name = "bech32"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d86b93f97252c47b41663388e6d155714a9d0c398b99f1005cbc5f978b29f445"
+
+[[package]]
+name = "bech32"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32637268377fc7b10a8c6d51de3e7fba1ce5dd371a96e342b34e6078db558e7f"
 
 [[package]]
 name = "bitfields"
@@ -1897,10 +1909,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "pass-age-piv"
+version = "2.1.0"
+dependencies = [
+ "age",
+ "age-core",
+ "base64 0.22.1",
+ "bech32 0.11.1",
+ "chacha20poly1305",
+ "hkdf",
+ "p256",
+ "rand_core",
+ "sha2 0.10.9",
+ "zeroize",
+]
+
+[[package]]
 name = "pass-core"
 version = "2.1.0"
 dependencies = [
- "base64",
+ "base64 0.21.7",
  "foreign-types-shared",
  "getrandom 0.4.3",
  "git2",
@@ -1932,6 +1960,9 @@ name = "pass-ffi"
 version = "2.1.0"
 dependencies = [
  "age",
+ "age-core",
+ "p256",
+ "pass-age-piv",
  "pass-core",
  "pgp",
  "rand",
@@ -1988,7 +2019,7 @@ dependencies = [
  "aes-gcm",
  "aes-kw",
  "argon2",
- "base64",
+ "base64 0.21.7",
  "bitfields",
  "block-padding",
  "blowfish",
