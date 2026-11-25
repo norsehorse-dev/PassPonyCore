@@ -1736,6 +1736,7 @@ dependencies = [
  "kem",
  "rand_core",
  "sha3",
+ "zeroize",
 ]
 
 [[package]]
@@ -1998,12 +1999,21 @@ name = "pass-ffi"
 version = "2.1.0"
 dependencies = [
  "age",
+ "age-core",
+ "base64 0.22.1",
+ "bech32",
+ "chacha20poly1305",
+ "hkdf",
+ "ml-kem",
  "pass-core",
  "pgp",
  "rand",
  "rsa",
+ "sha2 0.10.9",
+ "sha3",
  "thiserror 2.0.19",
  "uniffi",
+ "x25519-dalek",
  "zeroize",
 ]
 

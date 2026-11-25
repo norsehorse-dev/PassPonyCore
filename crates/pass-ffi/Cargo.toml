@@ -26,6 +26,21 @@ zeroize = "1"
 # binary age files.
 age = { version = "0.12", default-features = false, features = ["armor"], optional = true }
 
+# age's post-quantum recipient type (age1pq1..., see age_pq.rs), on top of
+# the age engine. The age crate has no native support for it yet, so the
+# KEM and HPKE pieces are built here from the same primitives the age
+# crate already depends on. Off by default: nothing ships with it until
+# PassPony 3.0 turns it on.
+age-core = { version = "0.12", optional = true }
+base64 = { version = "0.22", optional = true }
+bech32 = { version = "0.11", optional = true }
+chacha20poly1305 = { version = "0.10", optional = true }
+hkdf = { version = "0.12", optional = true }
+ml-kem = { version = "0.2", features = ["deterministic", "zeroize"], optional = true }
+sha2 = { version = "0.10", optional = true }
+sha3 = { version = "0.10", optional = true }
+x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
+
 # iOS-only Rust OpenPGP engine for pass stores (see pgp_engine.rs): the
 # keys and messages NorseHorsePGPCore can't handle (RSA, NIST curves,
 # GnuPG's AEAD packets). Android has BouncyCastle and leaves this off, so
@@ -37,6 +52,19 @@ rsa = { version = "0.9", optional = true }
 [features]
 cli = ["uniffi/cli"]
 age-engine = ["dep:age"]
+age-pq = [
+    "age-engine",
+    "dep:age-core",
+    "dep:base64",
+    "dep:bech32",
+    "dep:chacha20poly1305",
+    "dep:hkdf",
+    "dep:ml-kem",
+    "dep:rand",
+    "dep:sha2",
+    "dep:sha3",
+    "dep:x25519-dalek",
+]
 pgp-engine = ["dep:pgp", "dep:rand", "dep:rsa"]
 
 [[bin]]

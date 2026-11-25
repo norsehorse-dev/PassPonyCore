@@ -30,6 +30,8 @@ pub use passkey_api::*;
 mod age_engine;
 #[cfg(feature = "age-engine")]
 pub use age_engine::*;
+#[cfg(feature = "age-pq")]
+mod age_pq;
 
 // iOS-only Rust OpenPGP engine for pass stores: RSA and the other keys
 // and packets NorseHorsePGPCore can't read. Off by default, so Android's

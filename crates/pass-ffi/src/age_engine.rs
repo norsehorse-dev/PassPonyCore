@@ -12,6 +12,14 @@
 //! - decrypt tries every loaded identity;
 //! - errors never carry entry names or plaintext, only the FFI's
 //!   existing CryptoError variants.
+//!
+//! With the `age-pq` feature the engine also handles age's post-quantum
+//! keys (`age1pq1...` recipients, `AGE-SECRET-KEY-PQ-1...` identities,
+//! see age_pq.rs). An identities file may hold both kinds and decrypt
+//! tries all of them. A file is never encrypted to a mix of the two:
+//! age refuses, since the classic stanza would undo the post-quantum
+//! one, and `encrypt` reports that as `EncryptionFailed`. Without the
+//! feature every post-quantum line is skipped or refused as before.
 
 use std::io::{Read, Write};
 use std::str::FromStr;
@@ -23,6 +31,8 @@ use age::x25519::{Identity, Recipient as X25519Recipient};
 use age::{scrypt, DecryptError, Decryptor, Encryptor};
 use zeroize::Zeroizing;
 
+#[cfg(feature = "age-pq")]
+use crate::age_pq::{HybridIdentity, HybridRecipient};
 use crate::CryptoError;
 
 /// A freshly generated identity, in both forms the caller needs: the
@@ -65,6 +75,53 @@ pub fn age_identities_recipients(text: String) -> Vec<String> {
         }
     }
     out
+}
+
+/// Generates a new post-quantum identity (`AGE-SECRET-KEY-PQ-1...`) with
+/// its `age1pq1...` recipient. The classic counterpart is
+/// `age_generate_identity`.
+#[cfg(feature = "age-pq")]
+#[uniffi::export]
+pub fn age_generate_pq_identity() -> GeneratedIdentity {
+    let identity = HybridIdentity::generate();
+    GeneratedIdentity {
+        identity_string: identity.encode().as_str().to_owned(),
+        recipient_string: identity.to_public().encode(),
+    }
+}
+
+/// The public key (`age1pq1...`) of every post-quantum identity in an
+/// identities file's text, in file order. The classic counterpart is
+/// `age_identities_recipients`; the two lists never overlap, so a caller
+/// picks the one that matches the store it is writing to.
+#[cfg(feature = "age-pq")]
+#[uniffi::export]
+pub fn age_identities_pq_recipients(text: String) -> Vec<String> {
+    let text = Zeroizing::new(text);
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(identity) = HybridIdentity::parse(line) {
+            let r = identity.to_public().encode();
+            if !out.contains(&r) {
+                out.push(r);
+            }
+        }
+    }
+    out
+}
+
+/// True when `recipient` is written as a post-quantum age recipient
+/// (`age1pq1...`). A prefix check only: it says what kind of store a
+/// recipients file describes, not that the key is valid.
+#[cfg(feature = "age-pq")]
+#[uniffi::export]
+pub fn age_is_pq_recipient(recipient: String) -> bool {
+    recipient
+        .trim()
+        .starts_with(crate::age_pq::RECIPIENT_PREFIX)
 }
 
 /// Highest scrypt work factor (log2 N) accepted when unlocking a
@@ -168,6 +225,8 @@ fn decrypt_identities_file(
 #[derive(uniffi::Object)]
 pub struct AgeEngine {
     identities: Vec<Identity>,
+    #[cfg(feature = "age-pq")]
+    pq_identities: Vec<HybridIdentity>,
 }
 
 #[uniffi::export]
@@ -178,13 +237,28 @@ impl AgeEngine {
     /// with `NoUsableKey` only when actually used, matching iOS.
     #[uniffi::constructor]
     pub fn from_identities_text(text: String) -> Arc<Self> {
-        let identities = text
-            .lines()
-            .map(|line| line.trim())
-            .filter(|line| !line.is_empty() && !line.starts_with('#'))
-            .filter_map(|line| Identity::from_str(line).ok())
-            .collect();
-        Arc::new(AgeEngine { identities })
+        let text = Zeroizing::new(text);
+        let mut identities = Vec::new();
+        #[cfg(feature = "age-pq")]
+        let mut pq_identities = Vec::new();
+        for line in text.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Ok(identity) = Identity::from_str(line) {
+                identities.push(identity);
+                continue;
+            }
+            #[cfg(feature = "age-pq")]
+            if let Some(identity) = HybridIdentity::parse(line) {
+                pq_identities.push(identity);
+            }
+        }
+        Arc::new(AgeEngine {
+            identities,
+            #[cfg(feature = "age-pq")]
+            pq_identities,
+        })
     }
 
     pub fn encrypt(
@@ -192,29 +266,29 @@ impl AgeEngine {
         plaintext: Vec<u8>,
         recipients: Vec<String>,
     ) -> Result<Vec<u8>, CryptoError> {
-        if self.identities.is_empty() && recipients.is_empty() {
+        if !self.has_identities() && recipients.is_empty() {
             return Err(CryptoError::NoUsableKey);
         }
 
-        let targets: Vec<X25519Recipient> = if recipients.is_empty() {
-            self.identities.iter().map(Identity::to_public).collect()
+        let targets: Vec<Box<dyn age::Recipient>> = if recipients.is_empty() {
+            self.own_recipients()
         } else {
             let mut parsed = Vec::with_capacity(recipients.len());
             for spec in &recipients {
-                match X25519Recipient::from_str(spec) {
-                    Ok(r) => parsed.push(r),
+                match parse_recipient(spec) {
+                    Some(r) => parsed.push(r),
                     // Matches AgePonyEngine.swift: any parse failure
                     // collapses to a generic EncryptionFailed rather
                     // than naming the bad recipient in the error.
-                    Err(_) => return Err(CryptoError::EncryptionFailed),
+                    None => return Err(CryptoError::EncryptionFailed),
                 }
             }
             parsed
         };
 
-        let refs: Vec<&dyn age::Recipient> =
-            targets.iter().map(|r| r as &dyn age::Recipient).collect();
-        let encryptor = Encryptor::with_recipients(refs.into_iter())
+        // A set that mixes post-quantum and classic recipients fails
+        // here: age checks the labels each recipient returns.
+        let encryptor = Encryptor::with_recipients(targets.iter().map(|r| r.as_ref()))
             .map_err(|_| CryptoError::EncryptionFailed)?;
 
         let mut ciphertext = Vec::with_capacity(plaintext.len());
@@ -230,17 +304,20 @@ impl AgeEngine {
     }
 
     pub fn decrypt(&self, ciphertext: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
-        if self.identities.is_empty() {
+        if !self.has_identities() {
             return Err(CryptoError::NoUsableKey);
         }
 
         let decryptor =
             Decryptor::new(&ciphertext[..]).map_err(|_| CryptoError::DecryptionFailed)?;
-        let refs: Vec<&dyn age::Identity> = self
+        #[allow(unused_mut)]
+        let mut refs: Vec<&dyn age::Identity> = self
             .identities
             .iter()
             .map(|i| i as &dyn age::Identity)
             .collect();
+        #[cfg(feature = "age-pq")]
+        refs.extend(self.pq_identities.iter().map(|i| i as &dyn age::Identity));
         let mut reader = decryptor
             .decrypt(refs.into_iter())
             .map_err(|_| CryptoError::DecryptionFailed)?;
@@ -251,6 +328,50 @@ impl AgeEngine {
             .map_err(|_| CryptoError::DecryptionFailed)?;
         Ok(plaintext)
     }
+}
+
+impl AgeEngine {
+    fn has_identities(&self) -> bool {
+        #[cfg(feature = "age-pq")]
+        if !self.pq_identities.is_empty() {
+            return true;
+        }
+        !self.identities.is_empty()
+    }
+
+    /// The recipients for "encrypt to myself", used when a store has no
+    /// recipients file. Classic identities win when the file holds any,
+    /// which is every store made before post-quantum keys existed, so
+    /// loading a post-quantum identity next to them changes nothing.
+    /// Only an identities file with post-quantum keys alone encrypts to
+    /// those. Never both kinds: age would refuse the mix.
+    fn own_recipients(&self) -> Vec<Box<dyn age::Recipient>> {
+        #[cfg(feature = "age-pq")]
+        if self.identities.is_empty() {
+            return self
+                .pq_identities
+                .iter()
+                .map(|i| Box::new(i.to_public()) as Box<dyn age::Recipient>)
+                .collect();
+        }
+        self.identities
+            .iter()
+            .map(|i| Box::new(i.to_public()) as Box<dyn age::Recipient>)
+            .collect()
+    }
+}
+
+/// Parses one line of a recipients file: a classic `age1...` key, or
+/// with `age-pq` a post-quantum `age1pq1...` key.
+fn parse_recipient(spec: &str) -> Option<Box<dyn age::Recipient>> {
+    if let Ok(r) = X25519Recipient::from_str(spec) {
+        return Some(Box::new(r));
+    }
+    #[cfg(feature = "age-pq")]
+    if let Some(r) = HybridRecipient::parse(spec) {
+        return Some(Box::new(r));
+    }
+    None
 }
 
 #[cfg(test)]
@@ -572,6 +693,178 @@ mod tests {
         assert!(matches!(
             age_decrypt_with_passphrase(ct, "nope".into()),
             Err(CryptoError::DecryptionFailed)
+        ));
+    }
+}
+
+#[cfg(all(test, feature = "age-pq"))]
+mod pq_tests {
+    use super::*;
+
+    /// The recipient stanza types in an age file's header.
+    fn stanza_types(ciphertext: &[u8]) -> Vec<String> {
+        let header_end = ciphertext
+            .windows(4)
+            .position(|w| w == b"\n---")
+            .expect("age header ends with a MAC line");
+        std::str::from_utf8(&ciphertext[..header_end])
+            .expect("age headers are ASCII")
+            .lines()
+            .filter_map(|l| l.strip_prefix("-> "))
+            .filter_map(|l| l.split(' ').next())
+            // age adds a random "grease" stanza to some files.
+            .filter(|tag| !tag.ends_with("-grease"))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn both_kinds() -> (GeneratedIdentity, GeneratedIdentity, String) {
+        let classic = age_generate_identity();
+        let pq = age_generate_pq_identity();
+        let text = format!(
+            "# classic\n{}\n# post-quantum\n{}\n",
+            classic.identity_string, pq.identity_string
+        );
+        (classic, pq, text)
+    }
+
+    #[test]
+    fn generated_pq_identity_has_the_expected_shape() {
+        let pq = age_generate_pq_identity();
+        assert!(pq.identity_string.starts_with("AGE-SECRET-KEY-PQ-1"));
+        assert!(pq.recipient_string.starts_with("age1pq1"));
+        assert!(age_is_pq_recipient(pq.recipient_string.clone()));
+        assert!(!age_is_pq_recipient(
+            age_generate_identity().recipient_string
+        ));
+    }
+
+    #[test]
+    fn recipient_lists_keep_the_two_kinds_apart() {
+        let (classic, pq, text) = both_kinds();
+        assert_eq!(
+            age_identities_recipients(text.clone()),
+            vec![classic.recipient_string]
+        );
+        assert_eq!(
+            age_identities_pq_recipients(text),
+            vec![pq.recipient_string]
+        );
+    }
+
+    #[test]
+    fn encrypts_to_pq_recipients_and_decrypts() {
+        let a = age_generate_pq_identity();
+        let b = age_generate_pq_identity();
+        let writer = AgeEngine::from_identities_text(a.identity_string.clone());
+        let ciphertext = writer
+            .encrypt(
+                b"hunter2\n".to_vec(),
+                vec![a.recipient_string.clone(), b.recipient_string.clone()],
+            )
+            .expect("two post-quantum recipients");
+        assert_eq!(
+            stanza_types(&ciphertext),
+            vec!["mlkem768x25519", "mlkem768x25519"]
+        );
+        for secret in [a.identity_string, b.identity_string] {
+            let reader = AgeEngine::from_identities_text(secret);
+            assert_eq!(reader.decrypt(ciphertext.clone()).unwrap(), b"hunter2\n");
+        }
+    }
+
+    #[test]
+    fn one_identities_file_reads_both_kinds_of_entry() {
+        let (classic, pq, text) = both_kinds();
+        let engine = AgeEngine::from_identities_text(text);
+        let old = engine
+            .encrypt(b"old".to_vec(), vec![classic.recipient_string])
+            .unwrap();
+        let new = engine
+            .encrypt(b"new".to_vec(), vec![pq.recipient_string])
+            .unwrap();
+        assert_eq!(stanza_types(&old), vec!["X25519"]);
+        assert_eq!(stanza_types(&new), vec!["mlkem768x25519"]);
+        assert_eq!(engine.decrypt(old).unwrap(), b"old");
+        assert_eq!(engine.decrypt(new).unwrap(), b"new");
+    }
+
+    #[test]
+    fn mixed_recipients_are_refused() {
+        let (classic, pq, text) = both_kinds();
+        let engine = AgeEngine::from_identities_text(text);
+        let mixed = vec![pq.recipient_string, classic.recipient_string];
+        assert!(matches!(
+            engine.encrypt(b"x".to_vec(), mixed),
+            Err(CryptoError::EncryptionFailed)
+        ));
+    }
+
+    #[test]
+    fn self_encryption_stays_classic_when_a_classic_identity_exists() {
+        let (_, _, text) = both_kinds();
+        let engine = AgeEngine::from_identities_text(text);
+        let ciphertext = engine.encrypt(b"x".to_vec(), vec![]).unwrap();
+        assert_eq!(stanza_types(&ciphertext), vec!["X25519"]);
+        assert_eq!(engine.decrypt(ciphertext).unwrap(), b"x");
+    }
+
+    #[test]
+    fn self_encryption_is_pq_with_only_pq_identities() {
+        let pq = age_generate_pq_identity();
+        let engine = AgeEngine::from_identities_text(pq.identity_string);
+        let ciphertext = engine.encrypt(b"x".to_vec(), vec![]).unwrap();
+        assert_eq!(stanza_types(&ciphertext), vec!["mlkem768x25519"]);
+        assert_eq!(engine.decrypt(ciphertext).unwrap(), b"x");
+    }
+
+    #[test]
+    fn engine_decrypts_an_upstream_vector() {
+        let path = format!(
+            "{}/../../fixtures/age-pq/hybrid",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let raw = std::fs::read(path).unwrap();
+        let split = raw.windows(2).position(|w| w == b"\n\n").unwrap();
+        let header = std::str::from_utf8(&raw[..split]).unwrap();
+        let identity = header
+            .lines()
+            .find_map(|l| l.strip_prefix("identity: "))
+            .unwrap();
+        let engine = AgeEngine::from_identities_text(identity.to_owned());
+        let plaintext = engine.decrypt(raw[split + 2..].to_vec()).unwrap();
+        assert_eq!(plaintext, b"age");
+    }
+}
+
+#[cfg(all(test, not(feature = "age-pq")))]
+mod no_pq_tests {
+    use super::*;
+
+    /// Without the feature a post-quantum key is not something this
+    /// engine knows: the identity line is skipped and the recipient is
+    /// refused, exactly as in 2.x.
+    #[test]
+    fn pq_keys_are_skipped_or_refused() {
+        // A syntactically plausible pair; never parsed, so it need not
+        // be a real key.
+        let pq_identity = format!("AGE-SECRET-KEY-PQ-1{}", "Q".repeat(58));
+        let pq_recipient = format!("age1pq1{}", "q".repeat(1952));
+        let classic = age_generate_identity();
+        let engine = AgeEngine::from_identities_text(format!(
+            "{pq_identity}\n{}\n",
+            classic.identity_string
+        ));
+        let ciphertext = engine.encrypt(b"x".to_vec(), vec![]).unwrap();
+        assert_eq!(engine.decrypt(ciphertext).unwrap(), b"x");
+        assert!(matches!(
+            engine.encrypt(b"x".to_vec(), vec![pq_recipient]),
+            Err(CryptoError::EncryptionFailed)
+        ));
+        let only_pq = AgeEngine::from_identities_text(pq_identity);
+        assert!(matches!(
+            only_pq.encrypt(b"x".to_vec(), vec![]),
+            Err(CryptoError::NoUsableKey)
         ));
     }
 }
