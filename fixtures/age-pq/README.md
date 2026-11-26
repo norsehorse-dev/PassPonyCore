@@ -22,3 +22,6 @@ no extra dependency. The age files inside are byte-for-byte the same.
 test recipient from the Rust `age` crate (0.12.1,
 `src/native/tagpq.rs`, MIT or Apache-2.0), used to check that a
 hardware-held post-quantum key can sit in a post-quantum store.
+
+The matching store fixture is `fixtures/passage/post-quantum`, written by
+age itself through passage; see `fixtures/gen-age-pq-store.sh`.

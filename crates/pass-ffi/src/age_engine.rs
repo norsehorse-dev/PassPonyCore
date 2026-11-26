@@ -885,6 +885,84 @@ mod pq_tests {
         assert_eq!(engine.decrypt(ciphertext).unwrap(), b"x");
     }
 
+    /// `fixtures/passage/post-quantum` is written by the real tools
+    /// (`fixtures/gen-age-pq-store.sh`: age-keygen -pq and passage on
+    /// age 1.3 or later). The engine has to read every entry and get the
+    /// plaintext passage itself showed, and its own key derivation has to
+    /// agree with age-keygen about the recipient.
+    #[test]
+    fn real_post_quantum_store_matches_goldens() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/passage/post-quantum");
+        let identities = std::fs::read_to_string(fixture.join("identities"))
+            .expect("fixtures/passage/post-quantum/identities present");
+        let recipients = std::fs::read_to_string(fixture.join("store/.age-recipients"))
+            .expect("the fixture store has a recipients file");
+        assert_eq!(
+            pass_core::recipients::store_key_type(&recipients),
+            pass_core::recipients::StoreKeyType::PostQuantum
+        );
+        assert_eq!(
+            age_identities_pq_recipients(identities.clone()),
+            pass_core::recipients::recipients_in(&recipients)
+        );
+
+        let engine = AgeEngine::from_identities_text(identities);
+        for (entry, golden) in [("alpha", "alpha"), ("web/github", "web__github")] {
+            let ciphertext = std::fs::read(fixture.join(format!("store/{entry}.age")))
+                .unwrap_or_else(|_| panic!("fixture entry {entry} present"));
+            assert_eq!(stanza_types(&ciphertext), vec!["mlkem768x25519"]);
+            let expected = std::fs::read(fixture.join(format!("goldens/show/{golden}.out")))
+                .unwrap_or_else(|_| panic!("golden for {entry} present"));
+            assert_eq!(engine.decrypt(ciphertext).unwrap(), expected);
+        }
+    }
+
+    /// The other direction: the real `age` reads what the engine writes.
+    /// Needs age and age-keygen 1.3 or later on PATH, which CI's Ubuntu
+    /// does not have, so it only runs when asked for:
+    /// `cargo test -p pass-ffi --features age-pq -- --ignored`.
+    #[test]
+    #[ignore = "needs age 1.3 or later on PATH"]
+    fn real_age_reads_what_the_engine_writes() {
+        use std::process::Command;
+        let dir = std::env::temp_dir().join(format!("passpony-pq-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("key.txt");
+        let _ = std::fs::remove_file(&key);
+        let made = Command::new("age-keygen")
+            .arg("-pq")
+            .arg("-o")
+            .arg(&key)
+            .output()
+            .expect("age-keygen on PATH");
+        assert!(made.status.success(), "age-keygen -pq failed");
+        let identities = std::fs::read_to_string(&key).unwrap();
+        let recipient = age_identities_pq_recipients(identities.clone())
+            .pop()
+            .expect("the engine reads age-keygen's post-quantum identity");
+
+        let plaintext = b"written by PassPony\nusername: pony\n".to_vec();
+        let engine = AgeEngine::from_identities_text(identities);
+        let entry = dir.join("entry.age");
+        std::fs::write(
+            &entry,
+            engine.encrypt(plaintext.clone(), vec![recipient]).unwrap(),
+        )
+        .unwrap();
+
+        let shown = Command::new("age")
+            .arg("-d")
+            .arg("-i")
+            .arg(&key)
+            .arg(&entry)
+            .output()
+            .expect("age on PATH");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(shown.status.success(), "age could not decrypt the entry");
+        assert_eq!(shown.stdout, plaintext);
+    }
+
     #[test]
     fn engine_decrypts_an_upstream_vector() {
         let path = format!(
