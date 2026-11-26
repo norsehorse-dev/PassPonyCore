@@ -10,11 +10,17 @@
 //!   back to the loaded identities' own public keys (the
 //!   `age -e -i identities` behavior);
 //! - decrypt tries every loaded identity;
+//! - YubiKey identities (age-plugin-yubikey's `AGE-PLUGIN-YUBIKEY-1...`
+//!   stub lines) decrypt through a [`YubiKeyCard`] the app implements,
+//!   when the engine is built with one; plain identities are tried
+//!   first, so the card is asked only when nothing else opens the file;
 //! - errors never carry entry names or plaintext, only the FFI's
 //!   existing CryptoError variants.
 
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use age::armor::ArmoredReader;
@@ -168,6 +174,85 @@ fn decrypt_identities_file(
 #[derive(uniffi::Object)]
 pub struct AgeEngine {
     identities: Vec<Identity>,
+    yubikeys: Vec<YubiKeyIdentity>,
+}
+
+/// What a YubiKey returns for one decryption.
+#[derive(uniffi::Record)]
+pub struct YubiKeyEcdh {
+    /// The 32-byte ECDH result (x-coordinate) from PIV GENERAL
+    /// AUTHENTICATE with the given ephemeral point.
+    pub shared_secret: Vec<u8>,
+    /// The slot's P-256 public key, SEC1 (uncompressed is what the card
+    /// reports). Checked against the identity's tag before use.
+    pub public_key: Vec<u8>,
+}
+
+/// A YubiKey, as the app reaches it (NFC or USB): the one step of a
+/// YubiKey decryption that has to happen on the card.
+///
+/// `ecdh` is called on the thread that called `decrypt`, once per
+/// matching YubiKey identity, in identities-file order, and may block
+/// while the user presents the key, enters the PIV PIN and touches it.
+/// Return `Cancelled` when the user gives up: the engine then asks no
+/// further YubiKey and `decrypt` fails with `Cancelled`. Any other error
+/// (say, a different YubiKey was presented) moves on to the next one.
+#[uniffi::export(with_foreign)]
+pub trait YubiKeyCard: Send + Sync {
+    /// ECDH between the private key in PIV `slot` (0x82 is the plugin's
+    /// slot 1) of the YubiKey with serial `serial` and
+    /// `ephemeral_point` (65-byte uncompressed SEC1).
+    fn ecdh(
+        &self,
+        serial: u32,
+        slot: u8,
+        ephemeral_point: Vec<u8>,
+    ) -> Result<YubiKeyEcdh, CryptoError>;
+}
+
+/// One YubiKey identity stub, opened through the app's card.
+struct YubiKeyIdentity {
+    stub: pass_age_piv::PivStub,
+    card: Arc<dyn YubiKeyCard>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl age::Identity for YubiKeyIdentity {
+    fn unwrap_stanza(
+        &self,
+        stanza: &age_core::format::Stanza,
+    ) -> Option<Result<age_core::format::FileKey, DecryptError>> {
+        if stanza.tag != pass_age_piv::STANZA_TAG || self.cancelled.load(Ordering::Relaxed) {
+            return None;
+        }
+        let parsed = pass_age_piv::PivStanza::parse(&stanza.args, &stanza.body)?;
+        if !self.stub.matches(&parsed) {
+            return None;
+        }
+        let answer = match self.card.ecdh(
+            self.stub.serial(),
+            self.stub.slot(),
+            parsed.ephemeral_uncompressed(),
+        ) {
+            Ok(answer) => answer,
+            Err(CryptoError::Cancelled) => {
+                self.cancelled.store(true, Ordering::Relaxed);
+                return None;
+            }
+            Err(_) => return None,
+        };
+        let shared = Zeroizing::new(answer.shared_secret);
+        let recipient = match pass_age_piv::PivRecipient::from_sec1(&answer.public_key) {
+            Some(r) if r.tag() == self.stub.tag() => r,
+            _ => return Some(Err(DecryptError::DecryptionFailed)),
+        };
+        Some(
+            parsed
+                .unwrap(&recipient, &shared)
+                .map(|fk| age_core::format::FileKey::new(Box::new(*fk)))
+                .ok_or(DecryptError::DecryptionFailed),
+        )
+    }
 }
 
 #[uniffi::export]
@@ -184,7 +269,41 @@ impl AgeEngine {
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
             .filter_map(|line| Identity::from_str(line).ok())
             .collect();
-        Arc::new(AgeEngine { identities })
+        Arc::new(AgeEngine {
+            identities,
+            yubikeys: Vec::new(),
+        })
+    }
+
+    /// Like `from_identities_text`, but YubiKey identity stubs
+    /// (`AGE-PLUGIN-YUBIKEY-1...`) are kept too, and decrypt through
+    /// `card`.
+    #[uniffi::constructor]
+    pub fn from_identities_text_with_card(text: String, card: Arc<dyn YubiKeyCard>) -> Arc<Self> {
+        let lines: Vec<&str> = text
+            .lines()
+            .map(|line| line.trim())
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect();
+        let identities = lines
+            .iter()
+            .filter_map(|line| Identity::from_str(line).ok())
+            .collect();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let yubikeys = lines
+            .iter()
+            .filter(|line| pass_age_piv::is_piv_stub(line))
+            .filter_map(|line| pass_age_piv::PivStub::from_str(line).ok())
+            .map(|stub| YubiKeyIdentity {
+                stub,
+                card: Arc::clone(&card),
+                cancelled: Arc::clone(&cancelled),
+            })
+            .collect();
+        Arc::new(AgeEngine {
+            identities,
+            yubikeys,
+        })
     }
 
     pub fn encrypt(
@@ -196,24 +315,20 @@ impl AgeEngine {
             return Err(CryptoError::NoUsableKey);
         }
 
-        let targets: Vec<X25519Recipient> = if recipients.is_empty() {
-            self.identities.iter().map(Identity::to_public).collect()
+        let targets: Vec<Box<dyn age::Recipient>> = if recipients.is_empty() {
+            self.identities
+                .iter()
+                .map(|i| Box::new(i.to_public()) as Box<dyn age::Recipient>)
+                .collect()
         } else {
             let mut parsed = Vec::with_capacity(recipients.len());
             for spec in &recipients {
-                match X25519Recipient::from_str(spec) {
-                    Ok(r) => parsed.push(r),
-                    // Matches AgePonyEngine.swift: any parse failure
-                    // collapses to a generic EncryptionFailed rather
-                    // than naming the bad recipient in the error.
-                    Err(_) => return Err(CryptoError::EncryptionFailed),
-                }
+                parsed.push(parse_recipient(spec)?);
             }
             parsed
         };
 
-        let refs: Vec<&dyn age::Recipient> =
-            targets.iter().map(|r| r as &dyn age::Recipient).collect();
+        let refs: Vec<&dyn age::Recipient> = targets.iter().map(|r| r.as_ref()).collect();
         let encryptor = Encryptor::with_recipients(refs.into_iter())
             .map_err(|_| CryptoError::EncryptionFailed)?;
 
@@ -230,8 +345,11 @@ impl AgeEngine {
     }
 
     pub fn decrypt(&self, ciphertext: Vec<u8>) -> Result<Vec<u8>, CryptoError> {
-        if self.identities.is_empty() {
+        if self.identities.is_empty() && self.yubikeys.is_empty() {
             return Err(CryptoError::NoUsableKey);
+        }
+        for yk in &self.yubikeys {
+            yk.cancelled.store(false, Ordering::Relaxed);
         }
 
         let decryptor =
@@ -240,10 +358,19 @@ impl AgeEngine {
             .identities
             .iter()
             .map(|i| i as &dyn age::Identity)
+            .chain(self.yubikeys.iter().map(|y| y as &dyn age::Identity))
             .collect();
-        let mut reader = decryptor
-            .decrypt(refs.into_iter())
-            .map_err(|_| CryptoError::DecryptionFailed)?;
+        let mut reader = decryptor.decrypt(refs.into_iter()).map_err(|_| {
+            if self
+                .yubikeys
+                .iter()
+                .any(|y| y.cancelled.load(Ordering::Relaxed))
+            {
+                CryptoError::Cancelled
+            } else {
+                CryptoError::DecryptionFailed
+            }
+        })?;
 
         let mut plaintext = Vec::new();
         reader
@@ -253,9 +380,257 @@ impl AgeEngine {
     }
 }
 
+/// One `.age-recipients` line: an X25519 key, or a YubiKey key that
+/// age-plugin-yubikey made (`age1yubikey1...`), which encrypting to
+/// needs neither the plugin nor the key. Matches AgePonyEngine.swift:
+/// any parse failure collapses to a generic EncryptionFailed rather
+/// than naming the bad recipient in the error.
+fn parse_recipient(spec: &str) -> Result<Box<dyn age::Recipient>, CryptoError> {
+    if pass_age_piv::is_piv_recipient(spec) {
+        pass_age_piv::PivRecipient::from_str(spec)
+            .map(|r| Box::new(YubiKeyRecipient(r)) as Box<dyn age::Recipient>)
+            .map_err(|_| CryptoError::EncryptionFailed)
+    } else {
+        X25519Recipient::from_str(spec)
+            .map(|r| Box::new(r) as Box<dyn age::Recipient>)
+            .map_err(|_| CryptoError::EncryptionFailed)
+    }
+}
+
+/// [`pass_age_piv::PivRecipient`] as an age 0.11 recipient: one
+/// `piv-p256` stanza, no labels (it mixes with X25519, as with the
+/// plugin).
+struct YubiKeyRecipient(pass_age_piv::PivRecipient);
+
+impl age::Recipient for YubiKeyRecipient {
+    fn wrap_file_key(
+        &self,
+        file_key: &age_core::format::FileKey,
+    ) -> Result<(Vec<age_core::format::Stanza>, HashSet<String>), age::EncryptError> {
+        let s = self.0.wrap(file_key.expose_secret());
+        Ok((
+            vec![age_core::format::Stanza {
+                tag: pass_age_piv::STANZA_TAG.to_owned(),
+                args: s.args(),
+                body: s.body(),
+            }],
+            HashSet::new(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A store whose recipients mix a YubiKey and this device: the
+    /// device can still save, and still read what it saved. The YubiKey
+    /// stanza itself is checked against age-plugin-yubikey in
+    /// pass-age-piv's tests.
+    #[test]
+    fn encrypts_to_yubikey_and_x25519_recipients() {
+        use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+
+        let me = age_generate_identity();
+        let sk = p256::SecretKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+        let yk = pass_age_piv::PivRecipient::from_compressed(
+            sk.public_key().to_encoded_point(true).as_bytes(),
+        )
+        .unwrap();
+        let engine = AgeEngine::from_identities_text(me.identity_string.clone());
+
+        let plaintext = b"shared with the yubikey\n".to_vec();
+        let ciphertext = engine
+            .encrypt(
+                plaintext.clone(),
+                vec![yk.to_string(), me.recipient_string.clone()],
+            )
+            .expect("encrypt to a yubikey and an x25519 recipient");
+        assert!(ciphertext
+            .windows(b"-> piv-p256 ".len())
+            .any(|w| w == b"-> piv-p256 "));
+        assert_eq!(engine.decrypt(ciphertext).unwrap(), plaintext);
+    }
+
+    /// A software stand-in for a YubiKey: one P-256 key in one slot of
+    /// one serial, and a log of what it was asked.
+    struct SoftCard {
+        serial: u32,
+        sk: p256::SecretKey,
+        answer: Result<(), CryptoError>,
+        lie_about_key: bool,
+        calls: std::sync::Mutex<Vec<u32>>,
+    }
+
+    impl SoftCard {
+        fn new(serial: u32) -> Self {
+            SoftCard {
+                serial,
+                sk: p256::SecretKey::random(&mut p256::elliptic_curve::rand_core::OsRng),
+                answer: Ok(()),
+                lie_about_key: false,
+                calls: Default::default(),
+            }
+        }
+
+        fn recipient(&self) -> pass_age_piv::PivRecipient {
+            use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+            pass_age_piv::PivRecipient::from_sec1(
+                self.sk.public_key().to_encoded_point(false).as_bytes(),
+            )
+            .unwrap()
+        }
+
+        fn stub(&self) -> String {
+            pass_age_piv::PivStub::new(self.serial, 0x82, &self.recipient())
+                .unwrap()
+                .to_string()
+        }
+    }
+
+    /// Answers for whichever SoftCard has the asked-for serial.
+    struct Cards(Vec<Arc<SoftCard>>);
+
+    impl YubiKeyCard for Cards {
+        fn ecdh(
+            &self,
+            serial: u32,
+            slot: u8,
+            ephemeral_point: Vec<u8>,
+        ) -> Result<YubiKeyEcdh, CryptoError> {
+            use p256::elliptic_curve::sec1::ToEncodedPoint as _;
+            assert_eq!(slot, 0x82);
+            let card = self
+                .0
+                .iter()
+                .find(|c| c.serial == serial)
+                .expect("asked for a known serial");
+            card.calls.lock().unwrap().push(serial);
+            match &card.answer {
+                Ok(()) => {}
+                Err(CryptoError::Cancelled) => return Err(CryptoError::Cancelled),
+                Err(_) => {
+                    return Err(CryptoError::Unavailable {
+                        reason: "other key".into(),
+                    })
+                }
+            }
+            let epk = p256::PublicKey::from_sec1_bytes(&ephemeral_point).unwrap();
+            let shared = p256::ecdh::diffie_hellman(card.sk.to_nonzero_scalar(), epk.as_affine());
+            let public_key = if card.lie_about_key {
+                p256::SecretKey::random(&mut p256::elliptic_curve::rand_core::OsRng).public_key()
+            } else {
+                card.sk.public_key()
+            };
+            Ok(YubiKeyEcdh {
+                shared_secret: shared.raw_secret_bytes().to_vec(),
+                public_key: public_key.to_encoded_point(false).as_bytes().to_vec(),
+            })
+        }
+    }
+
+    fn encrypt_to(recipients: Vec<String>) -> Vec<u8> {
+        let writer = age_generate_identity();
+        AgeEngine::from_identities_text(writer.identity_string)
+            .encrypt(b"opened by a yubikey\n".to_vec(), recipients)
+            .unwrap()
+    }
+
+    #[test]
+    fn card_decrypts_a_yubikey_only_entry() {
+        let a = Arc::new(SoftCard::new(1111));
+        let ct = encrypt_to(vec![a.recipient().to_string()]);
+        let text = format!("# yk\n{}\n", a.stub());
+        let engine =
+            AgeEngine::from_identities_text_with_card(text, Arc::new(Cards(vec![a.clone()])));
+        assert_eq!(engine.decrypt(ct).unwrap(), b"opened by a yubikey\n");
+        assert_eq!(*a.calls.lock().unwrap(), vec![1111]);
+    }
+
+    #[test]
+    fn plain_identity_is_tried_before_the_card() {
+        let a = Arc::new(SoftCard::new(1111));
+        let phone = age_generate_identity();
+        let ct = encrypt_to(vec![a.recipient().to_string(), phone.recipient_string]);
+        let text = format!("{}\n{}\n", a.stub(), phone.identity_string);
+        let engine =
+            AgeEngine::from_identities_text_with_card(text, Arc::new(Cards(vec![a.clone()])));
+        assert_eq!(engine.decrypt(ct).unwrap(), b"opened by a yubikey\n");
+        assert!(a.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn cancelling_stops_asking_and_reports_cancelled() {
+        let mut a = SoftCard::new(1111);
+        a.answer = Err(CryptoError::Cancelled);
+        let a = Arc::new(a);
+        let b = Arc::new(SoftCard::new(2222));
+        let ct = encrypt_to(vec![a.recipient().to_string(), b.recipient().to_string()]);
+        let text = format!("{}\n{}\n", a.stub(), b.stub());
+        let engine = AgeEngine::from_identities_text_with_card(
+            text,
+            Arc::new(Cards(vec![a.clone(), b.clone()])),
+        );
+        assert!(matches!(
+            engine.decrypt(ct.clone()).unwrap_err(),
+            CryptoError::Cancelled
+        ));
+        assert!(b.calls.lock().unwrap().is_empty());
+        // The next decrypt asks again rather than staying cancelled.
+        let _ = engine.decrypt(ct);
+        assert_eq!(a.calls.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn a_missing_yubikey_moves_on_to_the_next() {
+        let mut a = SoftCard::new(1111);
+        a.answer = Err(CryptoError::NoUsableKey);
+        let a = Arc::new(a);
+        let b = Arc::new(SoftCard::new(2222));
+        let ct = encrypt_to(vec![a.recipient().to_string(), b.recipient().to_string()]);
+        let text = format!("{}\n{}\n", a.stub(), b.stub());
+        let engine = AgeEngine::from_identities_text_with_card(
+            text,
+            Arc::new(Cards(vec![a.clone(), b.clone()])),
+        );
+        assert_eq!(engine.decrypt(ct).unwrap(), b"opened by a yubikey\n");
+        assert_eq!(*b.calls.lock().unwrap(), vec![2222]);
+    }
+
+    #[test]
+    fn a_card_reporting_another_key_fails() {
+        let mut a = SoftCard::new(1111);
+        a.lie_about_key = true;
+        let a = Arc::new(a);
+        let ct = encrypt_to(vec![a.recipient().to_string()]);
+        let engine =
+            AgeEngine::from_identities_text_with_card(a.stub(), Arc::new(Cards(vec![a.clone()])));
+        assert!(matches!(
+            engine.decrypt(ct).unwrap_err(),
+            CryptoError::DecryptionFailed
+        ));
+    }
+
+    #[test]
+    fn without_a_card_stubs_are_ignored() {
+        let a = SoftCard::new(1111);
+        let ct = encrypt_to(vec![a.recipient().to_string()]);
+        let engine = AgeEngine::from_identities_text(a.stub());
+        assert!(matches!(
+            engine.decrypt(ct).unwrap_err(),
+            CryptoError::NoUsableKey
+        ));
+    }
+
+    #[test]
+    fn malformed_yubikey_recipient_reports_encryption_failed() {
+        let a = age_generate_identity();
+        let engine = AgeEngine::from_identities_text(a.identity_string);
+        let err = engine
+            .encrypt(b"x".to_vec(), vec!["age1yubikey1qqqqqq".to_owned()])
+            .unwrap_err();
+        assert!(matches!(err, CryptoError::EncryptionFailed));
+    }
 
     #[test]
     fn identities_recipients_lists_each_public_key_once() {

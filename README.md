@@ -15,7 +15,12 @@ Consumed by the platform apps: PassPony (iOS), PassPonyDesktop, PassPonyAndroid.
 - `crates/pass-ffi`: UniFFI bindings (Kotlin, Swift) over pass-core.
   `CryptoBackend` is exposed as a foreign-implemented callback interface so
   each platform plugs in its native engine.
-- `docs/`: design notes and spike memos.
+- `crates/pass-age-piv`: age-plugin-yubikey's `piv-p256` recipient type,
+  natively, so stores can list YubiKey (`age1yubikey1…`) recipients.
+- `docs/`: design notes and spike memos; `docs/yubikey-testing.md` walks
+  through checking YubiKey support against your own YubiKey.
+- `tools/yubikey-test-store.sh`: makes and checks the throwaway store that
+  procedure uses.
 
 ## Principles
 

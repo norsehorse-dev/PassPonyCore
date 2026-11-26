@@ -1,0 +1,24 @@
+[package]
+name = "pass-age-piv"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The age-plugin-yubikey (piv-p256) recipient type, natively: encrypt to age1yubikey1... without the plugin or the YubiKey."
+
+# Deliberately independent of the age crate: PassPony Android's engine is on
+# age 0.11 and PassPony Desktop on age 0.12, and each wraps this in a few
+# lines of its own age::Recipient impl.
+[dependencies]
+p256 = { version = "0.13", default-features = false, features = ["ecdh", "std"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+hkdf = "0.12"
+sha2 = "0.10"
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+bech32 = "0.11"
+base64 = "0.22"
+zeroize = "1"
+
+[dev-dependencies]
+age = { version = "0.11", default-features = false }
+age-core = "0.11"
