@@ -103,6 +103,12 @@ impl PivRecipient {
         Option::from(PublicKey::from_encoded_point(&point)).map(PivRecipient)
     }
 
+    /// The recipient for a SEC1 P-256 point in either encoding: what a
+    /// YubiKey reports for a PIV slot is uncompressed (`04 || x || y`).
+    pub fn from_sec1(bytes: &[u8]) -> Option<Self> {
+        PublicKey::from_sec1_bytes(bytes).ok().map(PivRecipient)
+    }
+
     /// The compressed SEC1 encoding of the public key.
     pub fn compressed(&self) -> [u8; COMPRESSED_POINT_BYTES] {
         let mut out = [0; COMPRESSED_POINT_BYTES];
@@ -144,6 +150,95 @@ impl PivRecipient {
 pub fn is_piv_recipient(s: &str) -> bool {
     s.len() > RECIPIENT_PREFIX.len()
         && s[..RECIPIENT_PREFIX.len()].eq_ignore_ascii_case(RECIPIENT_PREFIX)
+}
+
+/// The bech32 HRP of a YubiKey identity stub (written uppercase).
+pub const STUB_PREFIX: &str = "age-plugin-yubikey-";
+
+/// An age-plugin-yubikey identity line (`AGE-PLUGIN-YUBIKEY-1...`): which
+/// YubiKey and PIV slot hold the key, and the recipient's tag. Nothing in
+/// it is secret, and it does not carry the public key: that comes from
+/// the card, and has to match [`PivStub::tag`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PivStub {
+    serial: u32,
+    slot: u8,
+    tag: [u8; TAG_BYTES],
+}
+
+impl FromStr for PivStub {
+    type Err = ParseRecipientError;
+
+    /// Same layout as the plugin's `Stub::from_bytes`: serial (u32,
+    /// little-endian), PIV slot (0x82..=0x95, the retired key slots),
+    /// tag.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parsed = CheckedHrpstring::new::<Bech32>(s).map_err(|_| ParseRecipientError)?;
+        if parsed.hrp().to_lowercase() != STUB_PREFIX {
+            return Err(ParseRecipientError);
+        }
+        let bytes: Vec<u8> = parsed.byte_iter().collect();
+        if bytes.len() < 4 + 1 + TAG_BYTES || !(0x82..=0x95).contains(&bytes[4]) {
+            return Err(ParseRecipientError);
+        }
+        let mut tag = [0; TAG_BYTES];
+        tag.copy_from_slice(&bytes[5..5 + TAG_BYTES]);
+        Ok(PivStub {
+            serial: u32::from_le_bytes(bytes[0..4].try_into().expect("4 bytes")),
+            slot: bytes[4],
+            tag,
+        })
+    }
+}
+
+impl fmt::Display for PivStub {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut bytes = Vec::with_capacity(4 + 1 + TAG_BYTES);
+        bytes.extend_from_slice(&self.serial.to_le_bytes());
+        bytes.push(self.slot);
+        bytes.extend_from_slice(&self.tag);
+        let s = bech32::encode::<Bech32>(Hrp::parse_unchecked(STUB_PREFIX), &bytes)
+            .map_err(|_| fmt::Error)?;
+        f.write_str(&s.to_uppercase())
+    }
+}
+
+impl PivStub {
+    /// The stub for `recipient`'s key in `slot` (0x82..=0x95) of YubiKey
+    /// `serial`.
+    pub fn new(serial: u32, slot: u8, recipient: &PivRecipient) -> Option<Self> {
+        (0x82..=0x95).contains(&slot).then(|| PivStub {
+            serial,
+            slot,
+            tag: recipient.tag(),
+        })
+    }
+
+    /// The YubiKey's serial number.
+    pub fn serial(&self) -> u32 {
+        self.serial
+    }
+
+    /// The PIV slot (key reference) holding the key: 0x82 is the
+    /// plugin's slot 1.
+    pub fn slot(&self) -> u8 {
+        self.slot
+    }
+
+    /// The tag of the recipient this key opens.
+    pub fn tag(&self) -> [u8; TAG_BYTES] {
+        self.tag
+    }
+
+    /// Whether `stanza` was written for this key.
+    pub fn matches(&self, stanza: &PivStanza) -> bool {
+        self.tag == stanza.tag
+    }
+}
+
+/// True when `s` looks like a YubiKey identity stub (by prefix).
+pub fn is_piv_stub(s: &str) -> bool {
+    s.len() > STUB_PREFIX.len() && s[..STUB_PREFIX.len()].eq_ignore_ascii_case(STUB_PREFIX)
 }
 
 /// A `piv-p256` stanza: written by [`PivRecipient::wrap`], or read back
@@ -268,6 +363,39 @@ mod tests {
         assert_eq!(x.parse::<PivRecipient>(), Err(ParseRecipientError));
         assert!("age1yubikey1notbech32".parse::<PivRecipient>().is_err());
         assert!("".parse::<PivRecipient>().is_err());
+    }
+
+    #[test]
+    fn stub_round_trips_and_matches() {
+        let (sk, r) = software_key();
+        let stub = PivStub::new(12345678, 0x82, &r).unwrap();
+        let s = stub.to_string();
+        assert!(s.starts_with("AGE-PLUGIN-YUBIKEY-1"));
+        assert!(is_piv_stub(&s));
+        let back: PivStub = s.parse().unwrap();
+        assert_eq!(back, stub);
+        assert_eq!((back.serial(), back.slot()), (12345678, 0x82));
+        assert_eq!(s.to_lowercase().parse::<PivStub>().unwrap(), stub);
+
+        let stanza = r.wrap(&[3; FILE_KEY_BYTES]);
+        assert!(back.matches(&stanza));
+        let card_pk = sk.public_key().to_encoded_point(false);
+        let from_card = PivRecipient::from_sec1(card_pk.as_bytes()).unwrap();
+        assert_eq!(from_card, r);
+        assert_eq!(from_card.tag(), back.tag());
+
+        let (_, other) = software_key();
+        assert!(!back.matches(&other.wrap(&[3; FILE_KEY_BYTES])));
+    }
+
+    #[test]
+    fn stub_rejects_bad_slots_and_prefixes() {
+        let (_, r) = software_key();
+        assert!(PivStub::new(1, 0x9a, &r).is_none());
+        assert!(PivStub::new(1, 0x81, &r).is_none());
+        assert!(r.to_string().parse::<PivStub>().is_err());
+        assert!(!is_piv_stub(&r.to_string()));
+        assert!("AGE-SECRET-KEY-1QQQQ".parse::<PivStub>().is_err());
     }
 
     #[test]
