@@ -49,6 +49,44 @@ Status: living document, present from P0. Expand as surfaces land.
   gate. On Android only browsers on the bundled privileged list are served;
   a native app's request is declined, because confirming an app's claim on
   a site would need a network fetch to that site.
+- Post-quantum passage stores (3.0) use age's hybrid recipients
+  (`age1pq1...`, ML-KEM-768 with X25519), so an entry recorded from the
+  git host today is not opened by breaking X25519 alone later. A store is
+  one kind or the other: age refuses to encrypt one file to post-quantum
+  and classic recipients together, since the classic stanza would undo
+  the point, and the core reports that state as its own error instead of
+  writing anything. The store's kind is read from its recipients, never
+  from a setting someone could change out from under it. This protects
+  entry contents only. Git transport (SSH, TLS) and OpenPGP stores are as
+  quantum-safe as their own keys.
+- A classic key appearing in a post-quantum store is treated as an
+  out-of-date device, asked about on every sync, and can only be removed.
+  The apps never re-encrypt to it and never drop back to classic keys to
+  accommodate it. Anyone who can push to the repo can still add a key of
+  the right kind, which is why re-encrypting existing entries to a new key
+  always asks the person first.
+- Keys are compared by eye in one place, when another device's key shows
+  up. A post-quantum recipient is too long to compare whole, so the apps
+  show a fingerprint: the first 16 bytes of SHA-256 over the recipient as
+  written. A short prefix or suffix of the key is not used for this,
+  because its last characters are a checksum and the rest of a short
+  slice could be matched on purpose.
+- Device keys (iOS, 3.0) are age identities whose private half is a
+  Secure Enclave key that needs the owner for each use. What that buys:
+  the key cannot be copied off the phone, by a backup, a file-system
+  dump, or malware that reads the app's files, and a locked or
+  out-of-session phone cannot open entries addressed only to it. What it
+  does not: entries are readable on the unlocked, authenticated phone like
+  any other, and the store's other keys are unaffected. A cancelled or
+  failed hardware operation ends the decrypt; it never falls back to a
+  software identity for an entry addressed to the device key. Below
+  iOS 26 the Enclave has no ML-KEM, so a post-quantum device key keeps
+  that half's seed in the key file and only its P-256 half is
+  hardware-bound; opening an entry needs both.
+- A device key is never the only way in. It cannot be backed up, so the
+  app creates one only when a backed-up software identity, another
+  device's key, or a recovery key the person supplied can already open the
+  store. Losing the phone then loses a key, not the store.
 - FLAG_SECURE / screenshot suppression on reveal and passphrase screens.
 - Panic-lock action clears all cached secrets immediately.
 - An `otpauth://` URI is a secret like the password line: the core hands it
@@ -66,6 +104,12 @@ Status: living document, present from P0. Expand as surfaces land.
   host and anyone with repo access. Onboarding says so plainly.
 - A compromised OS (keylogger, root malware, malicious keyboard) is out of
   scope on every platform.
+- Post-quantum keys cover confidentiality of entry contents against a
+  future quantum computer. They do not hide that an entry exists or
+  changed, and they are no stronger than the weakest key listed: a store
+  is only post-quantum while every recipient in it is.
+- A recovery key is trusted as given. The app checks that it is a usable
+  recipient of the store's kind, not who holds its private half.
 - The clipboard is a shared surface; auto-clear narrows, not closes, the
   window.
 - Trust on first use can't tell a real first connection from one that is
