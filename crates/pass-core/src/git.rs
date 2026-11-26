@@ -273,10 +273,17 @@ impl GitStore {
             .fetch_options(fo)
             .clone(url, &dest);
         let repo = transport_result(repo, &problem)?;
-        // An empty remote leaves HEAD on libgit2's default `master`, while
-        // init() and the bare repos git hosts create use `main`; the first
-        // push would then create a branch nobody's HEAD points at.
-        if repo.is_empty()? {
+        // No commit checked out means the remote's HEAD named a branch it
+        // does not have. Two ways to get here:
+        // - The remote has commits, just not on that branch: a bare repo
+        //   made with plain `git init --bare` keeps HEAD on `master` while
+        //   PassPony pushes `main` (3.0). Without this the store came down
+        //   empty with no error, so check the real branch out instead.
+        // - The remote is empty. HEAD is then left on libgit2's default
+        //   `master`, while init() and the bare repos git hosts create use
+        //   `main`; the first push would create a branch nobody's HEAD
+        //   points at.
+        if repo.head().is_err() && !adopt_remote_branch(&repo)? {
             repo.set_head("refs/heads/main")?;
         }
         // A cloned repo has no local identity until something sets one --
@@ -799,9 +806,134 @@ fn conflict_sibling(path: &str) -> String {
     format!("{path}.conflict")
 }
 
+/// For a fresh clone with nothing checked out: pick the branch the remote
+/// really has, make it the local branch tracking `origin`, and check it
+/// out. `main` wins when it exists; otherwise the remote's only branch is
+/// used. Returns false, changing nothing, when the remote has no branch or
+/// more than one with no `main` among them.
+fn adopt_remote_branch(repo: &Repository) -> Result<bool, git2::Error> {
+    let mut names: Vec<String> = Vec::new();
+    for item in repo.branches(Some(git2::BranchType::Remote))? {
+        let (branch, _) = item?;
+        if let Some(name) = branch.name()?.and_then(|n| n.strip_prefix("origin/")) {
+            if name != "HEAD" {
+                names.push(name.to_owned());
+            }
+        }
+    }
+    let name = if names.iter().any(|n| n == "main") {
+        "main".to_owned()
+    } else if names.len() == 1 {
+        names.remove(0)
+    } else {
+        return Ok(false);
+    };
+    let commit = repo
+        .find_branch(&format!("origin/{name}"), git2::BranchType::Remote)?
+        .get()
+        .peel_to_commit()?;
+    let mut local = repo.branch(&name, &commit, false)?;
+    local.set_upstream(Some(&format!("origin/{name}")))?;
+    repo.set_head(&format!("refs/heads/{name}"))?;
+    repo.checkout_head(Some(CheckoutBuilder::new().force()))?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("passpony-git-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// A bare remote whose HEAD names `head_branch`, with one commit on
+    /// `commit_branch` when given.
+    fn bare_remote(name: &str, head_branch: &str, commit_branch: Option<&str>) -> PathBuf {
+        let path = scratch(name);
+        let repo = Repository::init_opts(
+            &path,
+            git2::RepositoryInitOptions::new()
+                .bare(true)
+                .initial_head(head_branch),
+        )
+        .unwrap();
+        if let Some(branch) = commit_branch {
+            let blob = repo.blob(b"not really ciphertext").unwrap();
+            let mut tree = repo.treebuilder(None).unwrap();
+            tree.insert("alpha.age", blob, 0o100644).unwrap();
+            let tree = repo.find_tree(tree.write().unwrap()).unwrap();
+            let who = git2::Signature::now("PassPony", "passpony@localhost").unwrap();
+            repo.commit(
+                Some(&format!("refs/heads/{branch}")),
+                &who,
+                &who,
+                "Add current contents of password store.",
+                &tree,
+                &[],
+            )
+            .unwrap();
+        }
+        path
+    }
+
+    /// The trap a self-hosted bare repo sets: HEAD on `master`, the store
+    /// pushed to `main`. The clone has to come down with the entries.
+    #[test]
+    fn clone_checks_out_main_when_the_remote_head_points_elsewhere() {
+        let remote = bare_remote("dangling-remote", "master", Some("main"));
+        let dest = scratch("dangling-clone");
+        let store = GitStore::clone_from(remote.to_str().unwrap(), &dest, None).unwrap();
+        assert!(dest.join("alpha.age").is_file());
+        let head = store.repo.head().unwrap();
+        assert_eq!(head.shorthand(), Some("main"));
+        let upstream = store
+            .repo
+            .find_branch("main", git2::BranchType::Local)
+            .unwrap()
+            .upstream()
+            .unwrap();
+        assert_eq!(upstream.name().unwrap(), Some("origin/main"));
+        let _ = std::fs::remove_dir_all(&remote);
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// With no `main`, the remote's only branch is the store.
+    #[test]
+    fn clone_checks_out_the_only_branch() {
+        let remote = bare_remote("only-remote", "main", Some("passwords"));
+        let dest = scratch("only-clone");
+        let store = GitStore::clone_from(remote.to_str().unwrap(), &dest, None).unwrap();
+        assert!(dest.join("alpha.age").is_file());
+        assert_eq!(store.repo.head().unwrap().shorthand(), Some("passwords"));
+        let _ = std::fs::remove_dir_all(&remote);
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// An ordinary remote is untouched by any of this, and an empty one
+    /// still ends up on `main` so the first push lands where HEAD points.
+    #[test]
+    fn clone_of_ordinary_and_empty_remotes_is_unchanged() {
+        let remote = bare_remote("plain-remote", "main", Some("main"));
+        let dest = scratch("plain-clone");
+        let store = GitStore::clone_from(remote.to_str().unwrap(), &dest, None).unwrap();
+        assert!(dest.join("alpha.age").is_file());
+        assert_eq!(store.repo.head().unwrap().shorthand(), Some("main"));
+
+        let empty = bare_remote("empty-remote", "master", None);
+        let empty_dest = scratch("empty-clone");
+        let store = GitStore::clone_from(empty.to_str().unwrap(), &empty_dest, None).unwrap();
+        assert!(store.repo.head().is_err());
+        assert_eq!(
+            store.repo.find_reference("HEAD").unwrap().symbolic_target(),
+            Some("refs/heads/main")
+        );
+        for dir in [remote, dest, empty, empty_dest] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 
     #[test]
     fn conflict_sibling_keeps_entry_extension() {
