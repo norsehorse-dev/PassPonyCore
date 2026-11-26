@@ -103,8 +103,15 @@ passage` asks for the PIN without echo (or reads `PASSPONY_PIV_PIN`).
    don't uninstall the store build to make room, since that deletes its
    keys.
 2. Choose passage, let the app make its own age identity, and clone the
-   test store. **Expect** the app to add its own key to `.age-recipients`
-   and commit that; that's how a phone shares a store.
+   test store from the first-run tour. **Expect** the app to add its own
+   key to `.age-recipients` and commit that; that's how a phone shares a
+   store.
+
+   A debug build fills an empty passage store with fake demo entries
+   (`DemoSeed`) once onboarding is done. If they land in the test store's
+   folder, Sync stops with "The store has local changes that aren't
+   committed yet". Remove them (they're all fake):
+   `adb shell run-as com.passpony.android rm -r files/store/finance files/store/mail files/store/web files/store/wifi files/store/work files/store/dev`.
 3. Add an entry, `test/phone`, and sync. **Expect** it to save and push.
    Before YubiKey support, this failed with an encryption error.
 4. Open `test/phone` on the phone. **Expect** it to open with the phone's
