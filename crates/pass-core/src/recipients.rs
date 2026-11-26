@@ -27,6 +27,61 @@ pub fn recipients_in(text: &str) -> Vec<String> {
     out
 }
 
+/// What kind of age keys a recipients file lists (3.0). age will not
+/// encrypt one file to post-quantum and classic recipients together, so a
+/// store is one kind or the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreKeyType {
+    /// No recipients listed.
+    Empty,
+    /// Only classic recipients (`age1...`, `age1tag1...`, SSH keys,
+    /// plugins).
+    Classic,
+    /// Only post-quantum recipients (`age1pq1...`, `age1tagpq1...`).
+    PostQuantum,
+    /// Both kinds. Nothing can be saved to this store until one kind is
+    /// removed.
+    Mixed,
+}
+
+const PQ_RECIPIENT_PREFIXES: [&str; 2] = ["age1pq1", "age1tagpq1"];
+
+/// True when `recipient` is written as a post-quantum age recipient:
+/// `age1pq1...`, or `age1tagpq1...` for a hardware-held key. A prefix check
+/// only; it does not prove the key is valid.
+pub fn is_post_quantum_recipient(recipient: &str) -> bool {
+    let r = recipient.trim().to_ascii_lowercase();
+    PQ_RECIPIENT_PREFIXES.iter().any(|p| r.starts_with(p))
+}
+
+/// The key type of a recipient list.
+pub fn key_type_of<S: AsRef<str>>(recipients: &[S]) -> StoreKeyType {
+    let mut pq = false;
+    let mut classic = false;
+    for r in recipients {
+        let r = r.as_ref().trim();
+        if r.is_empty() || r.starts_with('#') {
+            continue;
+        }
+        if is_post_quantum_recipient(r) {
+            pq = true;
+        } else {
+            classic = true;
+        }
+    }
+    match (pq, classic) {
+        (false, false) => StoreKeyType::Empty,
+        (false, true) => StoreKeyType::Classic,
+        (true, false) => StoreKeyType::PostQuantum,
+        (true, true) => StoreKeyType::Mixed,
+    }
+}
+
+/// The key type of a `.age-recipients` text.
+pub fn store_key_type(text: &str) -> StoreKeyType {
+    key_type_of(&recipients_in(text))
+}
+
 /// The result of adding keys: the new text and how many were added.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Added {
@@ -85,6 +140,30 @@ mod tests {
 
     const A: &str = "age1aaaa";
     const B: &str = "age1bbbb";
+
+    #[test]
+    fn key_type_follows_the_prefixes() {
+        assert_eq!(store_key_type(""), StoreKeyType::Empty);
+        assert_eq!(store_key_type("# age1pq1zzzz\n\n"), StoreKeyType::Empty);
+        assert_eq!(
+            store_key_type("age1aaaa\nage1tag1qqqq\nssh-ed25519 AAAA\n"),
+            StoreKeyType::Classic
+        );
+        assert_eq!(
+            store_key_type("age1pq1zzzz\n  AGE1TAGPQ1YYYY\n"),
+            StoreKeyType::PostQuantum
+        );
+        assert_eq!(
+            store_key_type("age1pq1zzzz\nage1aaaa\n"),
+            StoreKeyType::Mixed
+        );
+        assert_eq!(
+            key_type_of(&["age1tagpq1yyyy", "age1tag1qqqq"]),
+            StoreKeyType::Mixed
+        );
+        assert!(!is_post_quantum_recipient("age1pqaaaa"));
+        assert!(!is_post_quantum_recipient("age1tag1qqqq"));
+    }
 
     #[test]
     fn parses_like_age() {

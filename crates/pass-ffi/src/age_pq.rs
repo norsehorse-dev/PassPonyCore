@@ -50,8 +50,8 @@ const STANZA_TAG: &str = "mlkem768x25519";
 const AGE_LABEL: &[u8] = b"age-encryption.org/mlkem768x25519";
 const PQ_LABEL: &str = "postquantum";
 
-/// Prefix of a post-quantum recipient, as written in `.age-recipients`.
-pub(crate) const RECIPIENT_PREFIX: &str = "age1pq1";
+/// bech32 prefixes; with the `1` separator they read `age1pq1...` and
+/// `AGE-SECRET-KEY-PQ-1...`.
 const RECIPIENT_HRP: &str = "age1pq";
 const IDENTITY_HRP: &str = "age-secret-key-pq-";
 
@@ -493,7 +493,7 @@ mod tests {
         let secret = identity.encode();
         assert!(secret.starts_with("AGE-SECRET-KEY-PQ-1"));
         let recipient = identity.to_public().encode();
-        assert!(recipient.starts_with(RECIPIENT_PREFIX));
+        assert!(recipient.starts_with("age1pq1"));
         assert_eq!(recipient.len(), 1959);
 
         let reparsed = HybridIdentity::parse(&secret).expect("own secret parses");

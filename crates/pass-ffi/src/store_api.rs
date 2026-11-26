@@ -30,6 +30,10 @@ pub enum StoreError {
     SneakyPath,
     #[error("crypto: {reason}")]
     Crypto { reason: String },
+    /// The store's recipients mix post-quantum and classic age keys (3.0),
+    /// so the entry was not written.
+    #[error("recipients mix post-quantum and classic keys")]
+    MixedRecipients,
     #[error("io: {reason}")]
     Io { reason: String },
 }
@@ -41,6 +45,9 @@ impl From<pass_core::store::StoreError> for StoreError {
             E::NoStore => StoreError::NoStore,
             E::NotInStore => StoreError::NotInStore,
             E::SneakyPath => StoreError::SneakyPath,
+            E::Crypto(pass_core::crypto::CryptoError::MixedRecipients) => {
+                StoreError::MixedRecipients
+            }
             E::Crypto(c) => StoreError::Crypto {
                 reason: c.to_string(),
             },

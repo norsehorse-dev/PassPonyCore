@@ -15,6 +15,27 @@
 const AGE_BINARY_MAGIC: &[u8] = b"age-encryption.org/v1";
 const AGE_ARMOR_MAGIC: &[u8] = b"-----BEGIN AGE ENCRYPTED FILE-----";
 const SECRET_PREFIX: &str = "AGE-SECRET-KEY-1";
+const PQ_SECRET_PREFIX: &str = "AGE-SECRET-KEY-PQ-1";
+
+/// Which kind of age identity a line is, told from its prefix alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityKind {
+    /// `AGE-SECRET-KEY-1...`: X25519.
+    Classic,
+    /// `AGE-SECRET-KEY-PQ-1...`: hybrid ML-KEM-768 + X25519 (3.0).
+    PostQuantum,
+}
+
+fn identity_kind(line: &str) -> Option<IdentityKind> {
+    let upper = line.to_ascii_uppercase();
+    if upper.starts_with(PQ_SECRET_PREFIX) {
+        Some(IdentityKind::PostQuantum)
+    } else if upper.starts_with(SECRET_PREFIX) {
+        Some(IdentityKind::Classic)
+    } else {
+        None
+    }
+}
 
 /// True when `data`, after any leading whitespace, starts with an age header
 /// (binary or ASCII armor): a passphrase-protected identities file rather
@@ -31,6 +52,7 @@ pub fn is_age_encrypted(data: &[u8]) -> bool {
 pub struct IdentityBlock {
     pub comments: Vec<String>,
     pub secret: String,
+    pub kind: IdentityKind,
 }
 
 impl IdentityBlock {
@@ -45,8 +67,9 @@ impl IdentityBlock {
 
 /// Split an identities file into identity blocks. Comment lines attach to
 /// the next identity; a blank line ends a run of comments. Lines that are
-/// neither comments nor `AGE-SECRET-KEY-1` identities (plugin identities,
-/// garbage) are ignored here, as the engines ignore them.
+/// neither comments nor `AGE-SECRET-KEY-1` or `AGE-SECRET-KEY-PQ-1`
+/// identities (plugin identities, garbage) are ignored here, as the engines
+/// ignore them.
 pub fn parse_identities(text: &str) -> Vec<IdentityBlock> {
     let mut blocks = Vec::new();
     let mut pending: Vec<String> = Vec::new();
@@ -56,16 +79,26 @@ pub fn parse_identities(text: &str) -> Vec<IdentityBlock> {
             pending.clear();
         } else if line.starts_with('#') {
             pending.push(line.to_owned());
-        } else if line.to_ascii_uppercase().starts_with(SECRET_PREFIX) {
+        } else if let Some(kind) = identity_kind(line) {
             blocks.push(IdentityBlock {
                 comments: std::mem::take(&mut pending),
                 secret: line.to_owned(),
+                kind,
             });
         } else {
             pending.clear();
         }
     }
     blocks
+}
+
+/// True when an identities file holds at least one post-quantum identity.
+/// A backup that carries such a file is written as format version 2, so a
+/// reader from before 3.0 refuses it instead of restoring a file whose
+/// post-quantum keys it would silently ignore.
+pub fn has_post_quantum(text: &str) -> bool {
+    text.lines()
+        .any(|l| identity_kind(l.trim()) == Some(IdentityKind::PostQuantum))
 }
 
 /// Result of merging an imported identities file into the existing one.
@@ -153,6 +186,34 @@ mod tests {
         assert_eq!(blocks[0].public_key_hint(), Some("age1aaa"));
         assert_eq!(blocks[1].comments.len(), 2);
         assert_eq!(blocks[1].public_key_hint(), Some("age1bbb"));
+    }
+
+    const PQ: &str =
+        "# created: 2026-11-01T00:00:00Z\n# public key: age1pq1ccc\nAGE-SECRET-KEY-PQ-1CCCC\n";
+
+    #[test]
+    fn parse_tells_the_two_kinds_apart() {
+        let blocks = parse_identities(&format!("{A}\n{PQ}"));
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].kind, IdentityKind::Classic);
+        assert_eq!(blocks[1].kind, IdentityKind::PostQuantum);
+        assert_eq!(blocks[1].public_key_hint(), Some("age1pq1ccc"));
+        assert!(has_post_quantum(&format!("{A}\n{PQ}")));
+        assert!(has_post_quantum("age-secret-key-pq-1cccc\n"));
+        assert!(!has_post_quantum(A));
+        assert!(!has_post_quantum("# AGE-SECRET-KEY-PQ-1CCCC\n"));
+    }
+
+    #[test]
+    fn merge_keeps_post_quantum_identities() {
+        let m = merge_identities(A, PQ);
+        assert_eq!((m.added, m.already_present), (1, 0));
+        assert_eq!(m.text, format!("{A}\n{PQ}"));
+        let again = merge_identities(&m.text, PQ);
+        assert_eq!((again.added, again.already_present), (0, 1));
+        assert_eq!(again.text, m.text);
+        let into_pq = merge_identities(PQ, A);
+        assert_eq!(into_pq.text, format!("{PQ}\n{A}"));
     }
 
     #[test]

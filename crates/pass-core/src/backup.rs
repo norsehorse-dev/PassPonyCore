@@ -14,8 +14,16 @@
 //! back before the backup counts as done, and the check character catches a
 //! mistyped code at restore time before any scrypt work starts.
 
-/// First line of every container. The number is the format version.
+/// First line of a version 1 container. The number is the format version.
 pub const HEADER: &str = "PassPony backup 1";
+/// First line of a version 2 container (3.0): same layout, written only
+/// when an `age-identities` section holds a post-quantum identity. A reader
+/// from before 3.0 would restore that file and then ignore the key, so the
+/// higher number makes it refuse the backup instead. Backups without a
+/// post-quantum identity stay version 1 and open everywhere.
+pub const HEADER_V2: &str = "PassPony backup 2";
+const HEADER_PREFIX: &str = "PassPony backup ";
+const NEWEST_VERSION: u32 = 2;
 const TRAILER: &str = "end";
 
 /// Section kinds this version writes. Readers keep sections of other kinds
@@ -51,10 +59,29 @@ pub struct Section {
     pub data: Vec<u8>,
 }
 
+/// The format version `encode` writes for these sections: 2 when an
+/// `age-identities` section holds a post-quantum identity, otherwise 1.
+pub fn version_for(sections: &[Section]) -> u32 {
+    let pq = sections.iter().any(|s| {
+        s.kind == KIND_AGE_IDENTITIES
+            && std::str::from_utf8(&s.data).is_ok_and(crate::identities::has_post_quantum)
+    });
+    if pq {
+        2
+    } else {
+        1
+    }
+}
+
 /// Serialize sections into the container plaintext.
 pub fn encode(sections: &[Section]) -> Vec<u8> {
     let mut out = Vec::new();
-    out.extend_from_slice(HEADER.as_bytes());
+    let header = if version_for(sections) == 2 {
+        HEADER_V2
+    } else {
+        HEADER
+    };
+    out.extend_from_slice(header.as_bytes());
     out.push(b'\n');
     for s in sections {
         let kind: String = s.kind.chars().filter(|c| !c.is_whitespace()).collect();
@@ -80,11 +107,11 @@ pub fn decode(data: &[u8]) -> Result<Vec<Section>, BackupError> {
     let mut pos = 0usize;
     let header = read_line(data, &mut pos).ok_or(BackupError::NotABackup)?;
     let version = header
-        .strip_prefix("PassPony backup ")
+        .strip_prefix(HEADER_PREFIX)
         .ok_or(BackupError::NotABackup)?;
     match version.trim().parse::<u32>() {
-        Ok(1) => {}
-        Ok(v) if v > 1 => return Err(BackupError::NewerVersion),
+        Ok(1..=NEWEST_VERSION) => {}
+        Ok(v) if v > NEWEST_VERSION => return Err(BackupError::NewerVersion),
         _ => return Err(BackupError::NotABackup),
     }
     let mut sections = Vec::new();
@@ -252,9 +279,37 @@ mod tests {
         assert_eq!(decode(&extra), Err(BackupError::Damaged));
         assert_eq!(decode(b"hello\n"), Err(BackupError::NotABackup));
         assert_eq!(
-            decode(b"PassPony backup 2\nend\n"),
+            decode(b"PassPony backup 3\nend\n"),
             Err(BackupError::NewerVersion)
         );
+    }
+
+    #[test]
+    fn a_post_quantum_identity_makes_it_version_2() {
+        let classic = Section {
+            kind: KIND_AGE_IDENTITIES.to_owned(),
+            name: String::new(),
+            data: b"# public key: age1aaa\nAGE-SECRET-KEY-1AAAA\n".to_vec(),
+        };
+        let pq = Section {
+            kind: KIND_AGE_IDENTITIES.to_owned(),
+            name: String::new(),
+            data: b"AGE-SECRET-KEY-1AAAA\nAGE-SECRET-KEY-PQ-1CCCC\n".to_vec(),
+        };
+        let lookalike = Section {
+            kind: KIND_PGP_SECRET_KEY.to_owned(),
+            name: "k.asc".to_owned(),
+            data: b"AGE-SECRET-KEY-PQ-1CCCC\n".to_vec(),
+        };
+
+        let v1 = encode(&[classic.clone(), lookalike.clone()]);
+        assert!(v1.starts_with(b"PassPony backup 1\n"));
+        assert_eq!(version_for(&[classic.clone(), lookalike]), 1);
+
+        let v2 = encode(&[classic.clone(), pq.clone()]);
+        assert!(v2.starts_with(b"PassPony backup 2\n"));
+        assert_eq!(decode(&v2).unwrap(), vec![classic, pq]);
+        assert_eq!(decode(b"PassPony backup 2\nend\n"), Ok(vec![]));
     }
 
     #[test]

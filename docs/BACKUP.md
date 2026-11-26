@@ -48,9 +48,15 @@ Line-based header, length-prefixed bodies, so key material can be any bytes:
     ...
     end\n
 
-- Line 1 is `PassPony backup <version>`. This document is version 1. A
-  reader refuses a higher version ("made by a newer version of PassPony")
-  rather than guessing.
+- Line 1 is `PassPony backup <version>`. This document covers versions 1
+  and 2, which share one layout. A reader refuses a higher version than it
+  knows ("made by a newer version of PassPony") rather than guessing.
+- Version 2 (3.0) is written only when an `age-identities` section holds a
+  post-quantum identity (`AGE-SECRET-KEY-PQ-1...`). A reader from before
+  3.0 would restore that file and then ignore the key, leaving a
+  post-quantum store unreadable with no warning, so the higher number makes
+  it refuse the backup instead. Every other backup is still version 1 and
+  opens in every release.
 - Each section header is the kind, a space, the body length in bytes as
   decimal, and optionally a space and a name (the original file name; never
   contains a newline). The body follows, then one `\n`.
@@ -87,8 +93,8 @@ unknown section and restores the rest.
 ## Tests
 
 - `pass-core` `backup::tests`: container round trip with binary bodies,
-  unknown kinds, truncation, newer versions, and every single-character
-  recovery-code typo.
+  unknown kinds, truncation, newer versions, version 2 for a post-quantum
+  identity, and every single-character recovery-code typo.
 - `pass-ffi` (`age-engine`): passphrase encrypt and decrypt round trip; the
   output is a plain age file (also checked by hand with `age -d`).
 - Cross-platform done-when for 2.0 rc1: a backup made on iOS restores on

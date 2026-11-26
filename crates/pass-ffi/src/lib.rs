@@ -75,6 +75,10 @@ pub enum CryptoError {
     Cancelled,
     #[error("backend unavailable: {reason}")]
     Unavailable { reason: String },
+    /// The recipient set holds post-quantum and classic age keys together
+    /// (3.0). Nothing was encrypted.
+    #[error("recipients mix post-quantum and classic keys")]
+    MixedRecipients,
 }
 
 impl From<pass_core::crypto::CryptoError> for CryptoError {
@@ -86,6 +90,7 @@ impl From<pass_core::crypto::CryptoError> for CryptoError {
             Core::NoUsableKey => CryptoError::NoUsableKey,
             Core::Cancelled => CryptoError::Cancelled,
             Core::Unavailable { reason } => CryptoError::Unavailable { reason },
+            Core::MixedRecipients => CryptoError::MixedRecipients,
         }
     }
 }
@@ -114,6 +119,7 @@ impl pass_core::crypto::CryptoBackend for ForeignBackendAdapter {
                 CryptoError::Unavailable { reason } => {
                     pass_core::crypto::CryptoError::Unavailable { reason }
                 }
+                CryptoError::MixedRecipients => pass_core::crypto::CryptoError::MixedRecipients,
                 _ => pass_core::crypto::CryptoError::EncryptionFailed,
             })
     }

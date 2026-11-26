@@ -22,6 +22,11 @@ pub enum CryptoError {
     Cancelled,
     #[error("backend unavailable: {reason}")]
     Unavailable { reason: String },
+    /// The recipient set holds post-quantum and classic age keys together.
+    /// age refuses that mix, since the classic keys would undo what the
+    /// post-quantum ones are for.
+    #[error("recipients mix post-quantum and classic keys")]
+    MixedRecipients,
 }
 
 /// A recipient as written in a `.gpg-id` or `.age-recipients` file: an OpenPGP

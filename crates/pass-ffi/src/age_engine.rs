@@ -113,17 +113,6 @@ pub fn age_identities_pq_recipients(text: String) -> Vec<String> {
     out
 }
 
-/// True when `recipient` is written as a post-quantum age recipient
-/// (`age1pq1...`). A prefix check only: it says what kind of store a
-/// recipients file describes, not that the key is valid.
-#[cfg(feature = "age-pq")]
-#[uniffi::export]
-pub fn age_is_pq_recipient(recipient: String) -> bool {
-    recipient
-        .trim()
-        .starts_with(crate::age_pq::RECIPIENT_PREFIX)
-}
-
 /// Highest scrypt work factor (log2 N) accepted when unlocking a
 /// passphrase-protected identities file. age and gopass default to 18
 /// (256 MiB of scrypt memory); each step doubles memory and time, so 20
@@ -270,6 +259,14 @@ impl AgeEngine {
             return Err(CryptoError::NoUsableKey);
         }
 
+        // Caught by prefix before any parsing, so the caller gets the
+        // same answer whether or not this build has post-quantum support.
+        if pass_core::recipients::key_type_of(&recipients)
+            == pass_core::recipients::StoreKeyType::Mixed
+        {
+            return Err(CryptoError::MixedRecipients);
+        }
+
         let targets: Vec<Box<dyn age::Recipient>> = if recipients.is_empty() {
             self.own_recipients()
         } else {
@@ -277,6 +274,15 @@ impl AgeEngine {
             for spec in &recipients {
                 match parse_recipient(spec) {
                     Some(r) => parsed.push(r),
+                    // A build without post-quantum support says so, so
+                    // the app can tell the user why instead of showing a
+                    // generic failure.
+                    #[cfg(not(feature = "age-pq"))]
+                    None if pass_core::recipients::is_post_quantum_recipient(spec) => {
+                        return Err(CryptoError::Unavailable {
+                            reason: "post-quantum keys are not supported in this build".to_owned(),
+                        })
+                    }
                     // Matches AgePonyEngine.swift: any parse failure
                     // collapses to a generic EncryptionFailed rather
                     // than naming the bad recipient in the error.
@@ -286,8 +292,8 @@ impl AgeEngine {
             parsed
         };
 
-        // A set that mixes post-quantum and classic recipients fails
-        // here: age checks the labels each recipient returns.
+        // age checks the labels each recipient returns as well, so a mix
+        // the prefix check above somehow missed still fails here.
         let encryptor = Encryptor::with_recipients(targets.iter().map(|r| r.as_ref()))
             .map_err(|_| CryptoError::EncryptionFailed)?;
 
@@ -361,15 +367,27 @@ impl AgeEngine {
     }
 }
 
-/// Parses one line of a recipients file: a classic `age1...` key, or
-/// with `age-pq` a post-quantum `age1pq1...` key.
+/// Parses one line of a recipients file: a classic `age1...` key or an
+/// `age1tag1...` hardware key (Secure Enclave, YubiKey), and with `age-pq`
+/// their post-quantum counterparts `age1pq1...` and `age1tagpq1...`.
+/// The tag kinds are encrypt-only here: the private half never leaves the
+/// hardware, so decrypting is the job of the device that holds it.
 fn parse_recipient(spec: &str) -> Option<Box<dyn age::Recipient>> {
+    let spec = spec.trim();
     if let Ok(r) = X25519Recipient::from_str(spec) {
         return Some(Box::new(r));
     }
-    #[cfg(feature = "age-pq")]
-    if let Some(r) = HybridRecipient::parse(spec) {
+    if let Ok(r) = age::tag::Recipient::from_str(spec) {
         return Some(Box::new(r));
+    }
+    #[cfg(feature = "age-pq")]
+    {
+        if let Some(r) = HybridRecipient::parse(spec) {
+            return Some(Box::new(r));
+        }
+        if let Ok(r) = age::tagpq::Recipient::from_str(spec) {
+            return Some(Box::new(r));
+        }
     }
     None
 }
@@ -478,6 +496,27 @@ mod tests {
         let engine = AgeEngine::from_identities_text(String::new());
         let err = engine.decrypt(vec![0u8; 4]).unwrap_err();
         assert!(matches!(err, CryptoError::NoUsableKey));
+    }
+
+    /// The P-256 tag recipient from the age crate's own tests. Encrypt
+    /// only: the private half lives in hardware this engine never sees.
+    const TAG_RECIPIENT: &str =
+        "age1tag1qt8lw0ual6avlwmwatk888yqnmdamm7xfd0wak53ut6elz5c4swx2yqdj4e";
+
+    #[test]
+    fn hardware_tag_recipients_sit_next_to_classic_ones() {
+        let generated = age_generate_identity();
+        let engine = AgeEngine::from_identities_text(generated.identity_string);
+        let ciphertext = engine
+            .encrypt(
+                b"x".to_vec(),
+                vec![TAG_RECIPIENT.to_owned(), generated.recipient_string],
+            )
+            .unwrap();
+        let header = String::from_utf8_lossy(&ciphertext);
+        assert!(header.contains("-> p256tag "));
+        assert!(header.contains("-> X25519 "));
+        assert_eq!(engine.decrypt(ciphertext).unwrap(), b"x");
     }
 
     #[test]
@@ -733,9 +772,11 @@ mod pq_tests {
         let pq = age_generate_pq_identity();
         assert!(pq.identity_string.starts_with("AGE-SECRET-KEY-PQ-1"));
         assert!(pq.recipient_string.starts_with("age1pq1"));
-        assert!(age_is_pq_recipient(pq.recipient_string.clone()));
-        assert!(!age_is_pq_recipient(
-            age_generate_identity().recipient_string
+        assert!(pass_core::recipients::is_post_quantum_recipient(
+            &pq.recipient_string
+        ));
+        assert!(!pass_core::recipients::is_post_quantum_recipient(
+            &age_generate_identity().recipient_string
         ));
     }
 
@@ -796,7 +837,33 @@ mod pq_tests {
         let mixed = vec![pq.recipient_string, classic.recipient_string];
         assert!(matches!(
             engine.encrypt(b"x".to_vec(), mixed),
-            Err(CryptoError::EncryptionFailed)
+            Err(CryptoError::MixedRecipients)
+        ));
+    }
+
+    const TAGPQ_RECIPIENT: &str = include_str!("../../../fixtures/age-pq/tagpq-recipient.txt");
+
+    #[test]
+    fn hardware_pq_recipients_sit_in_a_pq_store() {
+        let (classic, pq, text) = both_kinds();
+        let engine = AgeEngine::from_identities_text(text);
+        let ciphertext = engine
+            .encrypt(
+                b"x".to_vec(),
+                vec![TAGPQ_RECIPIENT.to_owned(), pq.recipient_string],
+            )
+            .unwrap();
+        assert_eq!(
+            stanza_types(&ciphertext),
+            vec!["mlkem768p256tag", "mlkem768x25519"]
+        );
+        assert_eq!(engine.decrypt(ciphertext).unwrap(), b"x");
+        assert!(matches!(
+            engine.encrypt(
+                b"x".to_vec(),
+                vec![TAGPQ_RECIPIENT.to_owned(), classic.recipient_string]
+            ),
+            Err(CryptoError::MixedRecipients)
         ));
     }
 
@@ -858,8 +925,15 @@ mod no_pq_tests {
         let ciphertext = engine.encrypt(b"x".to_vec(), vec![]).unwrap();
         assert_eq!(engine.decrypt(ciphertext).unwrap(), b"x");
         assert!(matches!(
-            engine.encrypt(b"x".to_vec(), vec![pq_recipient]),
-            Err(CryptoError::EncryptionFailed)
+            engine.encrypt(b"x".to_vec(), vec![pq_recipient.clone()]),
+            Err(CryptoError::Unavailable { .. })
+        ));
+        assert!(matches!(
+            engine.encrypt(
+                b"x".to_vec(),
+                vec![pq_recipient, classic.recipient_string.clone()]
+            ),
+            Err(CryptoError::MixedRecipients)
         ));
         let only_pq = AgeEngine::from_identities_text(pq_identity);
         assert!(matches!(

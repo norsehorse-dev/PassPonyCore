@@ -258,6 +258,9 @@ pub fn identities_merge(existing: String, imported: String) -> MergedIdentities 
 pub struct IdentityInfo {
     /// From the `# public key:` comment, when the file has one.
     pub public_key_hint: Option<String>,
+    /// True for a post-quantum identity (`AGE-SECRET-KEY-PQ-1...`), told
+    /// from the prefix. Says nothing about whether this build can use it.
+    pub post_quantum: bool,
 }
 
 #[uniffi::export]
@@ -266,8 +269,49 @@ pub fn identities_describe(text: String) -> Vec<IdentityInfo> {
         .iter()
         .map(|b| IdentityInfo {
             public_key_hint: b.public_key_hint().map(str::to_owned),
+            post_quantum: b.kind == pass_core::identities::IdentityKind::PostQuantum,
         })
         .collect()
+}
+
+/// What kind of age keys a recipients file lists (3.0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum StoreKeyType {
+    /// No recipients listed.
+    Empty,
+    /// Only classic recipients.
+    Classic,
+    /// Only post-quantum recipients (`age1pq1...`, `age1tagpq1...`).
+    PostQuantum,
+    /// Both kinds: nothing can be saved until one kind is removed.
+    Mixed,
+}
+
+impl From<pass_core::recipients::StoreKeyType> for StoreKeyType {
+    fn from(t: pass_core::recipients::StoreKeyType) -> Self {
+        use pass_core::recipients::StoreKeyType as T;
+        match t {
+            T::Empty => StoreKeyType::Empty,
+            T::Classic => StoreKeyType::Classic,
+            T::PostQuantum => StoreKeyType::PostQuantum,
+            T::Mixed => StoreKeyType::Mixed,
+        }
+    }
+}
+
+/// The key type of a `.age-recipients` text, from the recipients'
+/// prefixes. Works in every build, so an app without post-quantum support
+/// can still say why it cannot open a post-quantum store.
+#[uniffi::export]
+pub fn recipients_key_type(text: String) -> StoreKeyType {
+    pass_core::recipients::store_key_type(&text).into()
+}
+
+/// True when `recipient` is written as a post-quantum age recipient
+/// (`age1pq1...` or `age1tagpq1...`). A prefix check only.
+#[uniffi::export]
+pub fn recipient_is_post_quantum(recipient: String) -> bool {
+    pass_core::recipients::is_post_quantum_recipient(&recipient)
 }
 
 // --- backup ---------------------------------------------------------------------
@@ -324,7 +368,9 @@ pub fn backup_kind_pgp_secret_key() -> String {
 }
 
 /// Container plaintext for a backup; encrypt it with the recovery code
-/// (`age_encrypt_with_passphrase` on Android, AgePonyCore on iOS).
+/// (`age_encrypt_with_passphrase` on Android, AgePonyCore on iOS). The
+/// format version is 2 when the age identities hold a post-quantum key,
+/// which makes apps older than 3.0 refuse the backup; otherwise 1.
 #[uniffi::export]
 pub fn backup_encode(sections: Vec<BackupSection>) -> Vec<u8> {
     let sections: Vec<pass_core::backup::Section> = sections
