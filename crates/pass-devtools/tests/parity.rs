@@ -66,11 +66,15 @@ fn assert_show_parity(fixture: &Path, format: StoreFormat) {
             continue;
         }
         let stem = path.file_stem().unwrap().to_str().unwrap();
-        let rc: i32 = fs::read_to_string(path.with_extension("rc"))
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        // A golden with no `.rc` beside it is not for this test. The
+        // post-quantum fixture is one: this test decrypts by shelling out
+        // to whatever `age` is installed, which reads those files only from
+        // 1.3 on. pass-ffi checks that fixture with the Rust engine
+        // (`real_post_quantum_store_matches_goldens`, feature `age-pq`).
+        let Ok(rc_text) = fs::read_to_string(path.with_extension("rc")) else {
+            continue;
+        };
+        let rc: i32 = rc_text.trim().parse().unwrap();
         if rc != 0 {
             continue;
         }
