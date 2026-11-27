@@ -173,13 +173,13 @@ fn recipient_resolution_semantics() {
     .unwrap();
     match store.resolve_recipients("work/deep/sub/vault").unwrap() {
         RecipientSource::RecipientsFile(p) => {
-            assert!(p.ends_with("work/.age-recipients"), "got {p:?}")
+            assert_eq!(p, "work/.age-recipients")
         }
         other => panic!("expected work/.age-recipients, got {other:?}"),
     }
     match store.resolve_recipients("rootentry").unwrap() {
         RecipientSource::RecipientsFile(p) => {
-            assert!(p.parent().unwrap().ends_with("store"), "got {p:?}")
+            assert_eq!(p, ".age-recipients")
         }
         other => panic!("expected root .age-recipients, got {other:?}"),
     }

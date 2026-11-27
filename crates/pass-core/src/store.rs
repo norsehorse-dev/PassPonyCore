@@ -5,11 +5,12 @@
 //! pinned commit in fixtures/gen-fixtures.sh). See
 //! docs/passage-store-semantics.md; the fixture corpus is ground truth.
 
-use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::crypto::CryptoBackend;
 use crate::entry::Entry;
+use crate::fs::{self, FsError, StdFs, StoreFs};
 
 /// Which flavor of store this is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,10 +63,29 @@ pub enum StoreError {
     NotInStore,
     #[error("sneaky path rejected")]
     SneakyPath,
+    /// `add_entry` found an entry already saved under that name (3.0).
+    /// Nothing was written.
+    #[error("an entry with this name already exists")]
+    EntryExists,
+    /// The store's folder is gone or the permission to use it was taken
+    /// away (3.0, folder stores). Not an ordinary I/O failure: the app asks
+    /// for the folder again instead of showing an empty store.
+    #[error("the store's folder is no longer available")]
+    FolderUnavailable,
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Crypto(#[from] crate::crypto::CryptoError),
+}
+
+impl From<FsError> for StoreError {
+    fn from(e: FsError) -> Self {
+        match e {
+            FsError::NotFound => StoreError::Io(std::io::ErrorKind::NotFound.into()),
+            FsError::AccessLost => StoreError::FolderUnavailable,
+            FsError::Other(message) => StoreError::Io(std::io::Error::other(message)),
+        }
+    }
 }
 
 /// Reject path arguments containing `..` components, mirroring the CLIs'
@@ -100,62 +120,15 @@ pub enum RecipientSource {
     /// pass: parsed IDs from the nearest `.gpg-id` (comments and blank lines
     /// stripped, as the CLI does).
     Ids(Vec<String>),
-    /// passage: path to the nearest `.age-recipients`, handed to the backend
-    /// verbatim (the CLI passes it to `age -R` unparsed).
-    RecipientsFile(PathBuf),
+    /// passage: store-relative path of the nearest `.age-recipients` (the
+    /// CLI passes the file to `age -R` unparsed).
+    /// `Store::encryption_recipients` reads it.
+    RecipientsFile(String),
     /// passage with no `.age-recipients` anywhere up the tree: recipients are
     /// derived from the identities file (`age -e -i identities`).
     IdentitiesFallback,
     /// pass with no `.gpg-id` up the tree: the CLI refuses to operate.
     Uninitialized,
-}
-
-impl RecipientSource {
-    /// The recipient strings to hand a backend's `encrypt`. `Some(vec![])`
-    /// means "no explicit recipients — encrypt to your own identities"
-    /// (passage's identities-fallback branch); `None` means encryption is
-    /// impossible (pass without any `.gpg-id`).
-    ///
-    /// For `.age-recipients` files this parses the way age itself reads
-    /// `-R` files: one recipient per line, blank lines and `#` comments
-    /// skipped.
-    pub fn encryption_recipients(&self) -> Result<Option<Vec<String>>, StoreError> {
-        Ok(match self {
-            RecipientSource::Ids(ids) => Some(ids.clone()),
-            RecipientSource::RecipientsFile(path) => {
-                let raw = fs::read_to_string(path)?;
-                Some(
-                    raw.lines()
-                        .map(str::trim)
-                        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-                        .map(str::to_owned)
-                        .collect(),
-                )
-            }
-            RecipientSource::IdentitiesFallback => Some(Vec::new()),
-            RecipientSource::Uninitialized => None,
-        })
-    }
-}
-
-/// Write `data` to `path` atomically: temp file in the same directory, then
-/// rename over the target. Decrypted content never hits this path — only
-/// ciphertext does.
-fn atomic_write(path: &Path, data: &[u8]) -> Result<(), StoreError> {
-    let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = dir.join(format!(
-        ".passpony-tmp-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    fs::write(&tmp, data)?;
-    match fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e.into())
-        }
-    }
 }
 
 /// What `Store::reencrypt_readable` did: the entries rewritten, and how
@@ -167,19 +140,43 @@ pub struct ReencryptReport {
 }
 
 pub struct Store {
+    fs: Arc<dyn StoreFs>,
+    /// The directory of a store opened by path; empty for `with_fs`.
     root: PathBuf,
     format: StoreFormat,
 }
 
 impl Store {
+    /// A store in an ordinary directory.
     pub fn open(root: impl Into<PathBuf>, format: StoreFormat) -> Result<Self, StoreError> {
         let root = root.into();
         if !root.is_dir() {
             return Err(StoreError::NoStore);
         }
-        Ok(Store { root, format })
+        Ok(Store {
+            fs: Arc::new(StdFs::new(root.clone())),
+            root,
+            format,
+        })
     }
 
+    /// 3.0: a store reached through a file layer the platform supplies, for
+    /// a folder a plain path cannot reach. Such a store has no git.
+    pub fn with_fs(fs: Arc<dyn StoreFs>, format: StoreFormat) -> Result<Self, StoreError> {
+        match fs.list("") {
+            Ok(_) => {}
+            Err(FsError::NotFound) => return Err(StoreError::NoStore),
+            Err(e) => return Err(e.into()),
+        }
+        Ok(Store {
+            fs,
+            root: PathBuf::new(),
+            format,
+        })
+    }
+
+    /// The store's directory. Empty for a store opened with `with_fs`,
+    /// which has no path.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -188,49 +185,45 @@ impl Store {
         self.format
     }
 
-    fn entry_file(&self, name: &str) -> Result<PathBuf, StoreError> {
+    /// Make the directory a file goes in, unless that is the store root.
+    fn ensure_parent(&self, file: &str) -> Result<(), StoreError> {
+        match fs::parent(file) {
+            "" => Ok(()),
+            dir => Ok(self.fs.create_dir_all(dir)?),
+        }
+    }
+
+    /// Store-relative path of the entry's file.
+    fn entry_file(&self, name: &str) -> Result<String, StoreError> {
         if is_sneaky_path(name) {
             return Err(StoreError::SneakyPath);
         }
-        Ok(self
-            .root
-            .join(format!("{name}.{}", self.format.entry_extension())))
+        Ok(format!("{name}.{}", self.format.entry_extension()))
     }
 
     pub fn has_entry(&self, name: &str) -> bool {
-        matches!(self.entry_file(name), Ok(p) if p.is_file())
+        matches!(self.entry_file(name), Ok(p) if self.fs.is_file(&p).unwrap_or(false))
     }
 
     /// Walk the store, building the visible tree (what `ls` shows): dot-named
     /// files and directories excluded, `.git` excluded, extensions stripped.
     pub fn tree(&self) -> Result<DirNode, StoreError> {
-        self.walk_dir(&self.root)
+        self.walk_dir("")
     }
 
-    fn walk_dir(&self, dir: &Path) -> Result<DirNode, StoreError> {
+    fn walk_dir(&self, dir: &str) -> Result<DirNode, StoreError> {
         let ext = format!(".{}", self.format.entry_extension());
         let mut node = DirNode::default();
-        for res in fs::read_dir(dir)? {
-            let de = res?;
-            let file_name = de.file_name();
-            let name = match file_name.to_str() {
-                Some(s) => s.to_owned(),
-                None => continue, // non-UTF-8 names: passthrough-only, unlisted
-            };
-            if name.starts_with('.') {
+        for child in self.fs.list(dir)? {
+            if child.name.starts_with('.') {
                 continue; // includes .git, .gpg-id, .age-recipients, dot entries
             }
-            let ftype = de.file_type()?;
-            if ftype.is_dir() {
-                let child = self.walk_dir(&de.path())?;
-                node.dirs.push((name, child));
-            } else if ftype.is_file() {
-                if let Some(stripped) = name.strip_suffix(&ext) {
-                    node.entries.push(stripped.to_owned());
-                }
+            if child.is_dir {
+                let sub = self.walk_dir(&fs::join(dir, &child.name))?;
+                node.dirs.push((child.name, sub));
+            } else if let Some(stripped) = child.name.strip_suffix(&ext) {
+                node.entries.push(stripped.to_owned());
             }
-            // Symlinks deliberately unhandled in P0; the CLIs are internally
-            // inconsistent about them (see semantics notes §7).
         }
         node.dirs.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
         node.entries.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
@@ -242,43 +235,30 @@ impl Store {
     pub fn entries(&self) -> Result<Vec<EntryRef>, StoreError> {
         let ext = format!(".{}", self.format.entry_extension());
         let mut out = Vec::new();
-        self.collect_entries(&self.root, "", &ext, &mut out)?;
+        self.collect_entries("", &ext, &mut out)?;
         out.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
         Ok(out)
     }
 
     fn collect_entries(
         &self,
-        dir: &Path,
-        prefix: &str,
+        dir: &str,
         ext: &str,
         out: &mut Vec<EntryRef>,
     ) -> Result<(), StoreError> {
-        for res in fs::read_dir(dir)? {
-            let de = res?;
-            let name = match de.file_name().to_str() {
-                Some(s) => s.to_owned(),
-                None => continue,
-            };
-            if name == ".git" {
+        for child in self.fs.list(dir)? {
+            if child.name == ".git" {
                 continue;
             }
-            let ftype = de.file_type()?;
-            let rel = if prefix.is_empty() {
-                name.clone()
-            } else {
-                format!("{prefix}/{name}")
-            };
-            if ftype.is_dir() {
-                self.collect_entries(&de.path(), &rel, ext, out)?;
-            } else if ftype.is_file() {
-                if let Some(stripped) = rel.strip_suffix(ext) {
-                    let hidden = stripped.split('/').any(|c| c.starts_with('.'));
-                    out.push(EntryRef {
-                        name: stripped.to_owned(),
-                        hidden,
-                    });
-                }
+            let rel = fs::join(dir, &child.name);
+            if child.is_dir {
+                self.collect_entries(&rel, ext, out)?;
+            } else if let Some(stripped) = rel.strip_suffix(ext) {
+                let hidden = stripped.split('/').any(|c| c.starts_with('.'));
+                out.push(EntryRef {
+                    name: stripped.to_owned(),
+                    hidden,
+                });
             }
         }
         Ok(())
@@ -288,33 +268,49 @@ impl Store {
     /// CLIs: `show foo` finds `foo.gpg` even when directory `foo/` exists.
     pub fn read_entry(&self, name: &str, backend: &dyn CryptoBackend) -> Result<Entry, StoreError> {
         let file = self.entry_file(name)?;
-        if !file.is_file() {
+        if !self.fs.is_file(&file)? {
             return Err(StoreError::NotInStore);
         }
-        let ciphertext = fs::read(&file)?;
+        let ciphertext = self.fs.read(&file)?;
         let plaintext = backend.decrypt(&ciphertext)?;
         Ok(Entry::from_bytes(plaintext.to_vec()))
     }
 
     /// Encrypt `entry` to the recipients resolved for `name` and write it
-    /// atomically (temp file in the same directory, then rename), creating
-    /// parent directories as needed. Mirrors `pass insert` / `passage insert`.
+    /// atomically, creating parent directories as needed. Mirrors
+    /// `pass insert -f` / `passage insert -f`: an entry already saved under
+    /// `name` is replaced. Use [`Store::add_entry`] for a new entry.
     pub fn write_entry(
         &self,
         name: &str,
         entry: &Entry,
         backend: &dyn CryptoBackend,
     ) -> Result<(), StoreError> {
-        let recipients = self
-            .resolve_recipients(name)?
-            .encryption_recipients()?
-            .ok_or(crate::crypto::CryptoError::NoUsableKey)?;
+        let recipients = self.recipients_for(name)?;
         let ciphertext = backend.encrypt(entry.to_bytes(), &recipients)?;
         let file = self.entry_file(name)?;
-        if let Some(parent) = file.parent() {
-            fs::create_dir_all(parent)?;
+        self.ensure_parent(&file)?;
+        Ok(self.fs.write(&file, &ciphertext)?)
+    }
+
+    /// 3.0: write a new entry, refusing with [`StoreError::EntryExists`]
+    /// when one is already saved under `name`, so adding can never replace
+    /// an entry by accident. The check and the write are one call on
+    /// purpose: a caller cannot do one and forget the other. On a file
+    /// system that ignores case, a name that differs only by case counts as
+    /// taken, because it is the same file. A directory with the same name
+    /// is not in the way; `web` and `web/site` live side by side, as in the
+    /// CLIs.
+    pub fn add_entry(
+        &self,
+        name: &str,
+        entry: &Entry,
+        backend: &dyn CryptoBackend,
+    ) -> Result<(), StoreError> {
+        if self.fs.is_file(&self.entry_file(name)?)? {
+            return Err(StoreError::EntryExists);
         }
-        atomic_write(&file, &ciphertext)
+        self.write_entry(name, entry, backend)
     }
 
     /// Remove an entry and prune newly-empty parent directories up to the
@@ -322,19 +318,22 @@ impl Store {
     /// directory alive, matching the CLIs.
     pub fn remove_entry(&self, name: &str) -> Result<(), StoreError> {
         let file = self.entry_file(name)?;
-        if !file.is_file() {
+        if !self.fs.is_file(&file)? {
             return Err(StoreError::NotInStore);
         }
-        fs::remove_file(&file)?;
-        let mut dir = file.parent().map(Path::to_path_buf);
-        while let Some(d) = dir {
-            if d == self.root || !d.starts_with(&self.root) {
+        self.fs.remove_file(&file)?;
+        let mut dir = fs::parent(&file);
+        while !dir.is_empty() {
+            // Looked at here as well as in `remove_dir`, because a file
+            // layer whose delete is recursive would take the entries along.
+            match self.fs.list(dir) {
+                Ok(children) if children.is_empty() => {}
+                _ => break, // not empty (or gone) — stop pruning
+            }
+            if self.fs.remove_dir(dir).is_err() {
                 break;
             }
-            if fs::remove_dir(&d).is_err() {
-                break; // not empty (or gone) — stop pruning
-            }
-            dir = d.parent().map(Path::to_path_buf);
+            dir = fs::parent(dir);
         }
         Ok(())
     }
@@ -370,27 +369,23 @@ impl Store {
         remove_source: bool,
     ) -> Result<(), StoreError> {
         let src = self.entry_file(from)?;
-        if !src.is_file() {
+        if !self.fs.is_file(&src)? {
             return Err(StoreError::NotInStore);
         }
         let dst = self.entry_file(to)?;
-        if let Some(parent) = dst.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        self.ensure_parent(&dst)?;
         let must_reencrypt = match self.format {
             StoreFormat::Passage => true,
             StoreFormat::Pass => self.resolve_recipients(from)? != self.resolve_recipients(to)?,
         };
+        let ciphertext = self.fs.read(&src)?;
         if must_reencrypt {
-            let plaintext = backend.decrypt(&fs::read(&src)?)?;
-            let recipients = self
-                .resolve_recipients(to)?
-                .encryption_recipients()?
-                .ok_or(crate::crypto::CryptoError::NoUsableKey)?;
-            let ciphertext = backend.encrypt(&plaintext, &recipients)?;
-            atomic_write(&dst, &ciphertext)?;
+            let plaintext = backend.decrypt(&ciphertext)?;
+            let recipients = self.recipients_for(to)?;
+            self.fs
+                .write(&dst, &backend.encrypt(&plaintext, &recipients)?)?;
         } else {
-            fs::copy(&src, &dst)?;
+            self.fs.write(&dst, &ciphertext)?;
         }
         if remove_source {
             self.remove_entry(from)?;
@@ -430,13 +425,10 @@ impl Store {
         let targets = self.reencrypt_targets(subpath)?;
         for name in &targets {
             let file = self.entry_file(name)?;
-            let plaintext = backend.decrypt(&fs::read(&file)?)?;
-            let recipients = self
-                .resolve_recipients(name)?
-                .encryption_recipients()?
-                .ok_or(crate::crypto::CryptoError::NoUsableKey)?;
+            let plaintext = backend.decrypt(&self.fs.read(&file)?)?;
+            let recipients = self.recipients_for(name)?;
             let ciphertext = backend.encrypt(&plaintext, &recipients)?;
-            atomic_write(&file, &ciphertext)?;
+            self.fs.write(&file, &ciphertext)?;
         }
         Ok(targets)
     }
@@ -455,7 +447,7 @@ impl Store {
         let mut report = ReencryptReport::default();
         for name in self.reencrypt_targets(subpath)? {
             let file = self.entry_file(&name)?;
-            let plaintext = match backend.decrypt(&fs::read(&file)?) {
+            let plaintext = match backend.decrypt(&self.fs.read(&file)?) {
                 Ok(p) => p,
                 Err(CryptoError::DecryptionFailed) | Err(CryptoError::NoUsableKey) => {
                     report.skipped += 1;
@@ -463,33 +455,34 @@ impl Store {
                 }
                 Err(e) => return Err(e.into()),
             };
-            let recipients = self
-                .resolve_recipients(&name)?
-                .encryption_recipients()?
-                .ok_or(CryptoError::NoUsableKey)?;
+            let recipients = self.recipients_for(&name)?;
             let ciphertext = backend.encrypt(&plaintext, &recipients)?;
-            atomic_write(&file, &ciphertext)?;
+            self.fs.write(&file, &ciphertext)?;
             report.rewritten.push(name);
         }
         Ok(report)
     }
 
+    fn read_text(&self, path: &str) -> Result<String, StoreError> {
+        String::from_utf8(self.fs.read(path)?)
+            .map_err(|e| StoreError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, e)))
+    }
+
     /// The root recipients file's text (`.age-recipients` or `.gpg-id`),
     /// or `None` when the store has none.
     pub fn root_recipients(&self) -> Result<Option<String>, StoreError> {
-        let path = self.root.join(self.format.recipients_file_name());
-        if !path.is_file() {
+        let path = self.format.recipients_file_name();
+        if !self.fs.is_file(path)? {
             return Ok(None);
         }
-        Ok(Some(fs::read_to_string(path)?))
+        Ok(Some(self.read_text(path)?))
     }
 
     /// Replace the root recipients file, atomically.
     pub fn set_root_recipients(&self, text: &str) -> Result<(), StoreError> {
-        atomic_write(
-            &self.root.join(self.format.recipients_file_name()),
-            text.as_bytes(),
-        )
+        Ok(self
+            .fs
+            .write(self.format.recipients_file_name(), text.as_bytes())?)
     }
 
     /// Resolve the recipient source for (the directory containing) `name`,
@@ -500,31 +493,60 @@ impl Store {
         if is_sneaky_path(name) {
             return Err(StoreError::SneakyPath);
         }
-        let rel_dir = match name.rsplit_once('/') {
-            Some((dir, _)) => dir,
-            None => "",
-        };
-        let mut current = self.root.join(rel_dir);
+        let mut dir = fs::parent(name);
         loop {
-            let candidate = current.join(self.format.recipients_file_name());
-            if candidate.is_file() {
+            let candidate = fs::join(dir, self.format.recipients_file_name());
+            if self.fs.is_file(&candidate)? {
                 return Ok(match self.format {
                     StoreFormat::Passage => RecipientSource::RecipientsFile(candidate),
-                    StoreFormat::Pass => RecipientSource::Ids(parse_gpg_id_file(&candidate)?),
+                    StoreFormat::Pass => {
+                        RecipientSource::Ids(parse_gpg_id(&self.read_text(&candidate)?))
+                    }
                 });
             }
-            if current == self.root {
+            if dir.is_empty() {
                 break;
             }
-            match current.parent() {
-                Some(p) if p.starts_with(&self.root) => current = p.to_path_buf(),
-                _ => break,
-            }
+            dir = fs::parent(dir);
         }
         Ok(match self.format {
             StoreFormat::Passage => RecipientSource::IdentitiesFallback,
             StoreFormat::Pass => RecipientSource::Uninitialized,
         })
+    }
+
+    /// The recipient strings to hand a backend's `encrypt` for a resolved
+    /// source. `Some(vec![])` means "no explicit recipients — encrypt to
+    /// your own identities" (passage's identities-fallback branch); `None`
+    /// means encryption is impossible (pass without any `.gpg-id`).
+    ///
+    /// An `.age-recipients` file is parsed the way age itself reads `-R`
+    /// files: one recipient per line, blank lines and `#` comments skipped.
+    pub fn encryption_recipients(
+        &self,
+        source: &RecipientSource,
+    ) -> Result<Option<Vec<String>>, StoreError> {
+        Ok(match source {
+            RecipientSource::Ids(ids) => Some(ids.clone()),
+            RecipientSource::RecipientsFile(path) => Some(
+                self.read_text(path)?
+                    .lines()
+                    .map(str::trim)
+                    .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                    .map(str::to_owned)
+                    .collect(),
+            ),
+            RecipientSource::IdentitiesFallback => Some(Vec::new()),
+            RecipientSource::Uninitialized => None,
+        })
+    }
+
+    /// The recipients an entry saved as `name` is encrypted to.
+    fn recipients_for(&self, name: &str) -> Result<Vec<String>, StoreError> {
+        let source = self.resolve_recipients(name)?;
+        Ok(self
+            .encryption_recipients(&source)?
+            .ok_or(crate::crypto::CryptoError::NoUsableKey)?)
     }
 }
 
@@ -532,10 +554,9 @@ impl Store {
 /// the first `#`, then skip lines that end up empty. pass uses a shell
 /// `read -r` loop, so a final line without a trailing newline is *dropped* —
 /// we preserve that quirk deliberately.
-fn parse_gpg_id_file(path: &Path) -> Result<Vec<String>, StoreError> {
-    let raw = fs::read_to_string(path)?;
+fn parse_gpg_id(raw: &str) -> Vec<String> {
     let mut ids = Vec::new();
-    let mut rest = raw.as_str();
+    let mut rest = raw;
     while let Some(idx) = rest.find('\n') {
         let line = &rest[..idx];
         rest = &rest[idx + 1..];
@@ -545,7 +566,7 @@ fn parse_gpg_id_file(path: &Path) -> Result<Vec<String>, StoreError> {
         }
     }
     // `rest` now holds any final unterminated line — dropped, as in the CLI.
-    Ok(ids)
+    ids
 }
 
 /// Render the visible tree the way `pass ls` / `passage` do: the format's
@@ -705,15 +726,306 @@ mod tests {
 
     #[test]
     fn gpg_id_parsing_matches_pass() {
-        let dir = std::env::temp_dir().join("passpony-gpgid-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let f = dir.join(".gpg-id");
-        std::fs::write(
-            &f,
-            "AAAA # kevin\n# full comment line\n\nBBBB\nDROPPED-NO-NEWLINE",
-        )
-        .unwrap();
-        let ids = parse_gpg_id_file(&f).unwrap();
+        let ids = parse_gpg_id("AAAA # kevin\n# full comment line\n\nBBBB\nDROPPED-NO-NEWLINE");
         assert_eq!(ids, vec!["AAAA".to_string(), "BBBB".to_string()]);
+    }
+
+    // --- 3.0: the same behaviour over every file layer ---------------------
+
+    fn entry(text: &str) -> Entry {
+        Entry::from_bytes(text.as_bytes().to_vec())
+    }
+
+    fn names(store: &Store) -> Vec<String> {
+        store
+            .entries()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect()
+    }
+
+    /// Runs `check` on a passage store over `std::fs` and over memory.
+    fn on_each_fs(tag: &str, check: impl Fn(&Store)) {
+        let dir = std::env::temp_dir().join(format!("passpony-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        check(&Store::open(&dir, StoreFormat::Passage).unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let mem: Arc<dyn StoreFs> = Arc::new(crate::fs::MemFs::new());
+        check(&Store::with_fs(mem, StoreFormat::Passage).unwrap());
+    }
+
+    #[test]
+    fn entries_tree_and_pruning_on_each_fs() {
+        on_each_fs("walk", |store| {
+            store.set_root_recipients("me\n").unwrap();
+            for name in ["web/github", "web/deep/site", "bank", ".hidden/x"] {
+                store
+                    .write_entry(name, &entry("pw\n"), &ListedBackend)
+                    .unwrap();
+            }
+            assert_eq!(
+                names(store),
+                [".hidden/x", "bank", "web/deep/site", "web/github"]
+            );
+            assert!(store.entries().unwrap()[0].hidden);
+            let tree = store.tree().unwrap();
+            assert_eq!(tree.entries, ["bank"]);
+            assert_eq!(tree.dirs.len(), 1, "the dot directory is not shown");
+            assert_eq!(tree.dirs[0].0, "web");
+            assert_eq!(tree.dirs[0].1.entries, ["github"]);
+            assert!(store.has_entry("web/github"));
+            assert!(!store.has_entry("web"));
+            assert!(!store.has_entry("../web/github"));
+
+            // Removing the last entry of a directory removes the directory,
+            // and stops at the first one that still holds something.
+            store.remove_entry("web/deep/site").unwrap();
+            assert_eq!(store.tree().unwrap().dirs[0].1.dirs.len(), 0);
+            assert!(store.has_entry("web/github"));
+            store.remove_entry("web/github").unwrap();
+            assert!(store.tree().unwrap().dirs.is_empty());
+            assert!(matches!(
+                store.remove_entry("web/github"),
+                Err(StoreError::NotInStore)
+            ));
+            assert!(matches!(
+                store.read_entry("nope", &ListedBackend),
+                Err(StoreError::NotInStore)
+            ));
+        });
+    }
+
+    #[test]
+    fn a_recipients_file_keeps_its_directory_and_wins_for_entries_below() {
+        on_each_fs("recipients", |store| {
+            store.set_root_recipients("me\n").unwrap();
+            store
+                .write_entry("work/vpn", &entry("pw\n"), &ListedBackend)
+                .unwrap();
+            store
+                .fs
+                .write("work/.age-recipients", b"# team\nme\nother\n\n")
+                .unwrap();
+            assert_eq!(
+                store.resolve_recipients("work/deep/x").unwrap(),
+                RecipientSource::RecipientsFile("work/.age-recipients".into())
+            );
+            assert_eq!(
+                store.resolve_recipients("bank").unwrap(),
+                RecipientSource::RecipientsFile(".age-recipients".into())
+            );
+            store
+                .write_entry("work/deep/x", &entry("pw\n"), &ListedBackend)
+                .unwrap();
+            assert!(store
+                .fs
+                .read("work/deep/x.age")
+                .unwrap()
+                .starts_with(b"me,other\n"));
+
+            store.remove_entry("work/deep/x").unwrap();
+            store.remove_entry("work/vpn").unwrap();
+            assert!(
+                store.fs.is_file("work/.age-recipients").unwrap(),
+                "pruning never deletes a recipients file"
+            );
+        });
+    }
+
+    #[test]
+    fn move_copy_and_reencrypt_on_each_fs() {
+        on_each_fs("move", |store| {
+            store.set_root_recipients("me\n").unwrap();
+            store
+                .write_entry("a", &entry("one\n"), &ListedBackend)
+                .unwrap();
+            store.copy_entry("a", "copies/a", &ListedBackend).unwrap();
+            store.move_entry("a", "moved/a", &ListedBackend).unwrap();
+            assert_eq!(names(store), ["copies/a", "moved/a"]);
+            assert_eq!(
+                store
+                    .read_entry("moved/a", &ListedBackend)
+                    .unwrap()
+                    .to_bytes(),
+                b"one\n"
+            );
+
+            store.set_root_recipients("me\nother\n").unwrap();
+            assert_eq!(
+                store.reencrypt_subtree("copies", &ListedBackend).unwrap(),
+                ["copies/a"]
+            );
+            assert!(store
+                .fs
+                .read("copies/a.age")
+                .unwrap()
+                .starts_with(b"me,other\n"));
+            assert!(store.fs.read("moved/a.age").unwrap().starts_with(b"me\n"));
+        });
+    }
+
+    #[test]
+    fn add_entry_never_replaces() {
+        on_each_fs("add", |store| {
+            store.set_root_recipients("me\n").unwrap();
+            store
+                .add_entry("web/github", &entry("first\n"), &ListedBackend)
+                .unwrap();
+            assert!(matches!(
+                store.add_entry("web/github", &entry("second\n"), &ListedBackend),
+                Err(StoreError::EntryExists)
+            ));
+            assert_eq!(
+                store
+                    .read_entry("web/github", &ListedBackend)
+                    .unwrap()
+                    .to_bytes(),
+                b"first\n"
+            );
+
+            // A directory of the same name is not an entry of that name.
+            store
+                .add_entry("web", &entry("top\n"), &ListedBackend)
+                .unwrap();
+            assert_eq!(names(store), ["web", "web/github"]);
+
+            // Replacing on purpose still goes through write_entry.
+            store
+                .write_entry("web/github", &entry("second\n"), &ListedBackend)
+                .unwrap();
+            assert_eq!(
+                store
+                    .read_entry("web/github", &ListedBackend)
+                    .unwrap()
+                    .to_bytes(),
+                b"second\n"
+            );
+            assert!(matches!(
+                store.add_entry("../escape", &entry("x\n"), &ListedBackend),
+                Err(StoreError::SneakyPath)
+            ));
+        });
+    }
+
+    #[test]
+    fn add_entry_on_a_case_blind_folder_treats_other_case_as_taken() {
+        /// A file layer that ignores case, like FAT and most phones' shared
+        /// storage.
+        struct CaseBlind(crate::fs::MemFs);
+        impl StoreFs for CaseBlind {
+            fn list(&self, dir: &str) -> Result<Vec<crate::fs::FsEntry>, FsError> {
+                self.0.list(&dir.to_lowercase())
+            }
+            fn read(&self, path: &str) -> Result<Vec<u8>, FsError> {
+                self.0.read(&path.to_lowercase())
+            }
+            fn write(&self, path: &str, data: &[u8]) -> Result<(), FsError> {
+                self.0.write(&path.to_lowercase(), data)
+            }
+            fn create_dir_all(&self, dir: &str) -> Result<(), FsError> {
+                self.0.create_dir_all(&dir.to_lowercase())
+            }
+            fn remove_file(&self, path: &str) -> Result<(), FsError> {
+                self.0.remove_file(&path.to_lowercase())
+            }
+            fn remove_dir(&self, dir: &str) -> Result<(), FsError> {
+                self.0.remove_dir(&dir.to_lowercase())
+            }
+            fn is_file(&self, path: &str) -> Result<bool, FsError> {
+                self.0.is_file(&path.to_lowercase())
+            }
+        }
+        let fs: Arc<dyn StoreFs> = Arc::new(CaseBlind(crate::fs::MemFs::new()));
+        let store = Store::with_fs(fs, StoreFormat::Passage).unwrap();
+        store.set_root_recipients("me\n").unwrap();
+        store
+            .add_entry("GitHub", &entry("first\n"), &ListedBackend)
+            .unwrap();
+        assert!(matches!(
+            store.add_entry("github", &entry("second\n"), &ListedBackend),
+            Err(StoreError::EntryExists)
+        ));
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_old_entry_readable() {
+        let mem = Arc::new(crate::fs::MemFs::new());
+        let store = Store::with_fs(mem.clone(), StoreFormat::Passage).unwrap();
+        store.set_root_recipients("me\n").unwrap();
+        store
+            .write_entry("bank", &entry("old\n"), &ListedBackend)
+            .unwrap();
+        mem.fail_writes(true);
+        assert!(matches!(
+            store.write_entry("bank", &entry("new\n"), &ListedBackend),
+            Err(StoreError::Io(_))
+        ));
+        assert!(store.reencrypt_subtree("", &ListedBackend).is_err());
+        mem.fail_writes(false);
+        assert_eq!(
+            store.read_entry("bank", &ListedBackend).unwrap().to_bytes(),
+            b"old\n"
+        );
+    }
+
+    #[test]
+    fn a_lost_folder_is_its_own_error_not_an_empty_store() {
+        let mem = Arc::new(crate::fs::MemFs::new());
+        let store = Store::with_fs(mem.clone(), StoreFormat::Passage).unwrap();
+        store.set_root_recipients("me\n").unwrap();
+        store
+            .write_entry("bank", &entry("pw\n"), &ListedBackend)
+            .unwrap();
+        mem.lose_access(true);
+        assert!(matches!(
+            store.entries(),
+            Err(StoreError::FolderUnavailable)
+        ));
+        assert!(matches!(
+            store.read_entry("bank", &ListedBackend),
+            Err(StoreError::FolderUnavailable)
+        ));
+        assert!(matches!(
+            store.add_entry("new", &entry("pw\n"), &ListedBackend),
+            Err(StoreError::FolderUnavailable)
+        ));
+        assert!(matches!(
+            Store::with_fs(mem.clone(), StoreFormat::Passage),
+            Err(StoreError::FolderUnavailable)
+        ));
+        assert!(
+            !store.has_entry("bank"),
+            "has_entry stays a plain yes or no"
+        );
+    }
+
+    #[test]
+    fn pass_store_reads_gpg_id_through_the_file_layer() {
+        let mem = Arc::new(crate::fs::MemFs::new());
+        let store = Store::with_fs(mem.clone(), StoreFormat::Pass).unwrap();
+        assert_eq!(
+            store.resolve_recipients("a").unwrap(),
+            RecipientSource::Uninitialized
+        );
+        assert!(matches!(
+            store.write_entry("a", &entry("pw\n"), &ListedBackend),
+            Err(StoreError::Crypto(crate::crypto::CryptoError::NoUsableKey))
+        ));
+        store.set_root_recipients("me # mine\n").unwrap();
+        assert_eq!(
+            store.resolve_recipients("deep/a").unwrap(),
+            RecipientSource::Ids(vec!["me".into()])
+        );
+        // Same recipients on both sides: a pass move keeps the bytes.
+        store
+            .write_entry("a", &entry("pw\n"), &ListedBackend)
+            .unwrap();
+        let before = mem.file("a.gpg").unwrap();
+        store.move_entry("a", "deep/a", &ListedBackend).unwrap();
+        assert_eq!(mem.file("deep/a.gpg").unwrap(), before);
+        assert!(mem.file("a.gpg").is_none());
     }
 }

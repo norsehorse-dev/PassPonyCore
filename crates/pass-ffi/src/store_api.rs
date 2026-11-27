@@ -34,6 +34,14 @@ pub enum StoreError {
     /// so the entry was not written.
     #[error("recipients mix post-quantum and classic keys")]
     MixedRecipients,
+    /// `add_entry` found an entry already saved under that name (3.0).
+    /// Nothing was written.
+    #[error("an entry with this name already exists")]
+    EntryExists,
+    /// The store's folder is gone or the permission to use it was taken
+    /// away (3.0, folder stores).
+    #[error("the store's folder is no longer available")]
+    FolderUnavailable,
     #[error("io: {reason}")]
     Io { reason: String },
 }
@@ -45,6 +53,8 @@ impl From<pass_core::store::StoreError> for StoreError {
             E::NoStore => StoreError::NoStore,
             E::NotInStore => StoreError::NotInStore,
             E::SneakyPath => StoreError::SneakyPath,
+            E::EntryExists => StoreError::EntryExists,
+            E::FolderUnavailable => StoreError::FolderUnavailable,
             E::Crypto(pass_core::crypto::CryptoError::MixedRecipients) => {
                 StoreError::MixedRecipients
             }
@@ -64,6 +74,119 @@ pub struct EntryRef {
     pub hidden: bool,
 }
 
+/// One child of a directory, as a [`StoreFs`] lists it.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct FsEntry {
+    pub name: String,
+    pub is_dir: bool,
+}
+
+#[derive(Debug, thiserror::Error, uniffi::Error)]
+pub enum FsError {
+    #[error("not found")]
+    NotFound,
+    /// The folder was deleted or moved, or the permission to use it was
+    /// taken away. The store reports `StoreError::FolderUnavailable`.
+    #[error("the store's folder is no longer available")]
+    AccessLost,
+    #[error("{reason}")]
+    Other { reason: String },
+}
+
+/// An exception the platform's file layer threw without turning it into an
+/// `FsError` becomes an ordinary failure instead of a crash in the core.
+impl From<uniffi::UnexpectedUniFFICallbackError> for FsError {
+    fn from(e: uniffi::UnexpectedUniFFICallbackError) -> Self {
+        FsError::Other { reason: e.reason }
+    }
+}
+
+/// 3.0: the file layer of a folder store, implemented in Kotlin/Swift over
+/// whatever the platform uses to reach a folder the person picked (the
+/// Storage Access Framework on Android). See pass-core's `fs.rs` for the
+/// contract. In short: paths are store-relative with `/` separators and
+/// `""` is the root; `write` replaces the whole file and must never leave
+/// it half written; `remove_dir` removes an empty directory only and is
+/// never recursive; `list` leaves out anything that is not a file or a
+/// directory.
+///
+/// Called on whatever thread called into the store.
+#[uniffi::export(with_foreign)]
+pub trait StoreFs: Send + Sync {
+    fn list(&self, dir: String) -> Result<Vec<FsEntry>, FsError>;
+    fn read(&self, path: String) -> Result<Vec<u8>, FsError>;
+    fn write(&self, path: String, data: Vec<u8>) -> Result<(), FsError>;
+    fn create_dir_all(&self, dir: String) -> Result<(), FsError>;
+    fn remove_file(&self, path: String) -> Result<(), FsError>;
+    fn remove_dir(&self, dir: String) -> Result<(), FsError>;
+    fn is_file(&self, path: String) -> Result<bool, FsError>;
+}
+
+/// Adapts a foreign file layer to pass-core's trait.
+struct ForeignFsAdapter(Arc<dyn StoreFs>);
+
+fn core_fs_error(e: FsError) -> pass_core::fs::FsError {
+    match e {
+        FsError::NotFound => pass_core::fs::FsError::NotFound,
+        FsError::AccessLost => pass_core::fs::FsError::AccessLost,
+        FsError::Other { reason } => pass_core::fs::FsError::Other(reason),
+    }
+}
+
+impl pass_core::fs::StoreFs for ForeignFsAdapter {
+    fn list(&self, dir: &str) -> Result<Vec<pass_core::fs::FsEntry>, pass_core::fs::FsError> {
+        Ok(self
+            .0
+            .list(dir.to_owned())
+            .map_err(core_fs_error)?
+            .into_iter()
+            .map(|e| pass_core::fs::FsEntry {
+                name: e.name,
+                is_dir: e.is_dir,
+            })
+            .collect())
+    }
+    fn read(&self, path: &str) -> Result<Vec<u8>, pass_core::fs::FsError> {
+        self.0.read(path.to_owned()).map_err(core_fs_error)
+    }
+    fn write(&self, path: &str, data: &[u8]) -> Result<(), pass_core::fs::FsError> {
+        self.0
+            .write(path.to_owned(), data.to_vec())
+            .map_err(core_fs_error)
+    }
+    fn create_dir_all(&self, dir: &str) -> Result<(), pass_core::fs::FsError> {
+        self.0.create_dir_all(dir.to_owned()).map_err(core_fs_error)
+    }
+    fn remove_file(&self, path: &str) -> Result<(), pass_core::fs::FsError> {
+        self.0.remove_file(path.to_owned()).map_err(core_fs_error)
+    }
+    fn remove_dir(&self, dir: &str) -> Result<(), pass_core::fs::FsError> {
+        self.0.remove_dir(dir.to_owned()).map_err(core_fs_error)
+    }
+    fn is_file(&self, path: &str) -> Result<bool, pass_core::fs::FsError> {
+        self.0.is_file(path.to_owned()).map_err(core_fs_error)
+    }
+}
+
+/// An entry that is a sync tool's conflict copy of another entry (3.0).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct ConflictCopy {
+    /// The entry this is a copy of. It may no longer exist.
+    pub original: String,
+    /// When the conflict happened, as the tool wrote it: `YYYYMMDD-HHMMSS`.
+    pub stamp: String,
+}
+
+/// `Some` when an entry name is a Syncthing conflict copy
+/// (`<name>.sync-conflict-<date>-<time>-<device>`).
+#[uniffi::export]
+pub fn conflict_of(name: String) -> Option<ConflictCopy> {
+    pass_core::conflict::conflict_of(&name).map(|c| ConflictCopy {
+        original: c.original,
+        stamp: c.stamp,
+    })
+}
+
 /// A store handle. Cheap to open; holds no decrypted data, ever.
 #[derive(uniffi::Object)]
 pub struct PassStore {
@@ -76,6 +199,18 @@ impl PassStore {
     pub fn open(root: String, format: StoreFormat) -> Result<Arc<Self>, StoreError> {
         Ok(Arc::new(PassStore {
             inner: pass_core::store::Store::open(root, format.into())?,
+        }))
+    }
+
+    /// 3.0: open a folder store through the platform's file layer. There
+    /// is no git for such a store; `GitSync` needs a real directory.
+    #[uniffi::constructor]
+    pub fn open_with_fs(
+        fs: Arc<dyn StoreFs>,
+        format: StoreFormat,
+    ) -> Result<Arc<Self>, StoreError> {
+        Ok(Arc::new(PassStore {
+            inner: pass_core::store::Store::with_fs(Arc::new(ForeignFsAdapter(fs)), format.into())?,
         }))
     }
 
@@ -118,6 +253,25 @@ impl PassStore {
     ) -> Result<(), StoreError> {
         let adapter = ForeignBackendAdapter(backend);
         self.inner.write_entry(
+            &name,
+            &pass_core::entry::Entry::from_bytes(content),
+            &adapter,
+        )?;
+        Ok(())
+    }
+
+    /// 3.0: write a new entry. Fails with `StoreError::EntryExists`, and
+    /// writes nothing, when an entry is already saved under `name`. This
+    /// is what an Add screen calls; `write_entry` replaces without asking
+    /// and is for edits and for a replace the person confirmed.
+    pub fn add_entry(
+        &self,
+        name: String,
+        content: Vec<u8>,
+        backend: Arc<dyn CryptoBackend>,
+    ) -> Result<(), StoreError> {
+        let adapter = ForeignBackendAdapter(backend);
+        self.inner.add_entry(
             &name,
             &pass_core::entry::Entry::from_bytes(content),
             &adapter,
@@ -875,6 +1029,104 @@ mod tests {
             .map(|e| e.name)
             .collect();
         assert_eq!(names, vec!["web/example".to_string()]);
+    }
+
+    /// Stands in for a platform's file layer: pass-core's in-memory one,
+    /// behind the FFI trait and its types.
+    struct ForeignMem(pass_core::fs::MemFs);
+    fn ffi_fs_error(e: pass_core::fs::FsError) -> FsError {
+        match e {
+            pass_core::fs::FsError::NotFound => FsError::NotFound,
+            pass_core::fs::FsError::AccessLost => FsError::AccessLost,
+            pass_core::fs::FsError::Other(reason) => FsError::Other { reason },
+        }
+    }
+    impl StoreFs for ForeignMem {
+        fn list(&self, dir: String) -> Result<Vec<FsEntry>, FsError> {
+            use pass_core::fs::StoreFs as _;
+            Ok(self
+                .0
+                .list(&dir)
+                .map_err(ffi_fs_error)?
+                .into_iter()
+                .map(|e| FsEntry {
+                    name: e.name,
+                    is_dir: e.is_dir,
+                })
+                .collect())
+        }
+        fn read(&self, path: String) -> Result<Vec<u8>, FsError> {
+            pass_core::fs::StoreFs::read(&self.0, &path).map_err(ffi_fs_error)
+        }
+        fn write(&self, path: String, data: Vec<u8>) -> Result<(), FsError> {
+            pass_core::fs::StoreFs::write(&self.0, &path, &data).map_err(ffi_fs_error)
+        }
+        fn create_dir_all(&self, dir: String) -> Result<(), FsError> {
+            pass_core::fs::StoreFs::create_dir_all(&self.0, &dir).map_err(ffi_fs_error)
+        }
+        fn remove_file(&self, path: String) -> Result<(), FsError> {
+            pass_core::fs::StoreFs::remove_file(&self.0, &path).map_err(ffi_fs_error)
+        }
+        fn remove_dir(&self, dir: String) -> Result<(), FsError> {
+            pass_core::fs::StoreFs::remove_dir(&self.0, &dir).map_err(ffi_fs_error)
+        }
+        fn is_file(&self, path: String) -> Result<bool, FsError> {
+            pass_core::fs::StoreFs::is_file(&self.0, &path).map_err(ffi_fs_error)
+        }
+    }
+
+    #[test]
+    fn folder_store_through_a_foreign_file_layer() {
+        let fs = Arc::new(ForeignMem(pass_core::fs::MemFs::new()));
+        let store = PassStore::open_with_fs(fs.clone(), StoreFormat::Passage).unwrap();
+        let backend: Arc<dyn CryptoBackend> = Arc::new(FlipEngine);
+
+        store
+            .add_entry("web/example".into(), b"first\n".to_vec(), backend.clone())
+            .unwrap();
+        assert!(matches!(
+            store.add_entry("web/example".into(), b"second\n".to_vec(), backend.clone()),
+            Err(StoreError::EntryExists)
+        ));
+        assert_eq!(
+            store
+                .read_entry("web/example".into(), backend.clone())
+                .unwrap(),
+            b"first\n"
+        );
+        assert!(store.has_entry("web/example".into()));
+        store
+            .move_entry("web/example".into(), "moved".into(), backend.clone())
+            .unwrap();
+        let names: Vec<String> = store
+            .entries()
+            .unwrap()
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+        assert_eq!(names, vec!["moved".to_string()]);
+        assert!(
+            fs.0.file("web/example.age").is_none() && fs.0.file("moved.age").is_some(),
+            "the old file is gone and its directory was pruned"
+        );
+
+        fs.0.lose_access(true);
+        assert!(matches!(
+            store.entries(),
+            Err(StoreError::FolderUnavailable)
+        ));
+        assert!(matches!(
+            PassStore::open_with_fs(fs.clone(), StoreFormat::Passage),
+            Err(StoreError::FolderUnavailable)
+        ));
+    }
+
+    #[test]
+    fn conflict_copies_over_the_ffi_surface() {
+        let c = conflict_of("web/github.sync-conflict-20261126-175501-ABCDEFG".into()).unwrap();
+        assert_eq!(c.original, "web/github");
+        assert_eq!(c.stamp, "20261126-175501");
+        assert!(conflict_of("web/github".into()).is_none());
     }
 
     #[test]

@@ -9,8 +9,10 @@
 //! `pass`, `pass-otp`, and `passage` CLIs; see `docs/passage-store-semantics.md`.
 
 pub mod backup;
+pub mod conflict;
 pub mod crypto;
 pub mod entry;
+pub mod fs;
 pub mod generate;
 pub mod git;
 pub mod hotp;

@@ -4,7 +4,7 @@
 //! Every phone keeps its own identity and lists its public key here, so
 //! whatever any of them saves is readable by all of them; no secret key
 //! ever leaves a device. The file is read exactly the way age reads `-R`
-//! files and `RecipientSource::encryption_recipients` does: one recipient
+//! files and `Store::encryption_recipients` does: one recipient
 //! per line, blank lines and `#` comments skipped.
 //!
 //! Edits keep everything already in the file (comments, order, other
