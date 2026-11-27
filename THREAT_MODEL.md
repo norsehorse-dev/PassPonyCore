@@ -87,6 +87,22 @@ Status: living document, present from P0. Expand as surfaces land.
   app creates one only when a backed-up software identity, another
   device's key, or a recovery key the person supplied can already open the
   store. Losing the phone then loses a key, not the store.
+- Folder stores (3.0): a store can live in a folder the person picks
+  instead of app storage, so a file-sync tool carries the encrypted files.
+  On Android the app reaches that one folder through the Storage Access
+  Framework and asks for no storage permission; it never sees a path. The
+  core takes the file layer from the platform (`StoreFs`) and still checks
+  entry names itself before any call reaches it. A folder store has no
+  git, so it makes no network connection at all.
+- A folder that cannot be reached is reported as exactly that
+  (`FolderUnavailable`). The app never falls back to an empty store, which
+  would look like every entry had been deleted.
+- A save to a folder store never leaves a half-written entry: the bytes
+  go to a temp file that is promoted only once it is complete, and what an
+  interrupted save leaves behind is cleaned up, or finished, the next time
+  that directory is read.
+- Adding an entry never replaces one. The core's `add_entry` refuses a
+  name that is taken; replacing is a separate, confirmed step.
 - FLAG_SECURE / screenshot suppression on reveal and passphrase screens.
 - Panic-lock action clears all cached secrets immediately.
 - An `otpauth://` URI is a secret like the password line: the core hands it
@@ -108,6 +124,17 @@ Status: living document, present from P0. Expand as surfaces land.
   future quantum computer. They do not hide that an entry exists or
   changed, and they are no stronger than the weakest key listed: a store
   is only post-quantum while every recipient in it is.
+- Anything that can write to a folder store's folder, including the sync
+  tool and every device it syncs with, can add, change or delete entries
+  and can add a key to `.age-recipients`. What it cannot do is read them:
+  the app asks before re-encrypting existing entries to a key it has not
+  been asked about, so a key slipped into the file is not handed the
+  store. It can still make new saves go to that key until someone removes
+  it, and it can roll an entry back to an older ciphertext. Entry names
+  and the folder layout are visible to it, as they are to a git host.
+- A sync tool's conflict copies are ordinary entries. The app labels the
+  ones it recognises (Syncthing's naming); a conflicted `.age-recipients`
+  becomes a dot file the app does not show.
 - A recovery key is trusted as given. The app checks that it is a usable
   recipient of the store's kind, not who holds its private half.
 - The clipboard is a shared surface; auto-clear narrows, not closes, the
