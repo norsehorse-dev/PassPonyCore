@@ -40,6 +40,8 @@ mod age_pq;
 #[cfg(feature = "pgp-engine")]
 mod pgp_engine;
 #[cfg(feature = "pgp-engine")]
+mod pgp_legacy;
+#[cfg(feature = "pgp-engine")]
 pub use pgp_engine::*;
 
 uniffi::setup_scaffolding!();

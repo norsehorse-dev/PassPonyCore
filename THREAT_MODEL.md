@@ -135,6 +135,16 @@ Status: living document, present from P0. Expand as surfaces land.
 - A sync tool's conflict copies are ordinary entries. The app labels the
   ones it recognises (Syncthing's naming); a conflicted `.age-recipients`
   becomes a dot file the app does not show.
+- pass stores keyed to ElGamal or brainpool keys: the OpenPGP library
+  (rpgp) reads those keys but has no arithmetic for them, so the engine
+  does the public-key step itself in `pgp_legacy.rs`, with a general
+  big-integer library. That code is written for PassPony, has had no
+  outside review, and is not constant-time. It runs on the device that
+  holds the key, on the person's own entries, and is tested both ways
+  against GnuPG. The message format, the symmetric encryption and its
+  integrity check are still rpgp's. RSA, Curve25519 and NIST-curve keys
+  never touch it. ElGamal is weaker than a current key at the same size
+  and is supported so old stores keep opening, not as a recommendation.
 - A recovery key is trusted as given. The app checks that it is a usable
   recipient of the store's kind, not who holds its private half.
 - The clipboard is a shared surface; auto-clear narrows, not closes, the

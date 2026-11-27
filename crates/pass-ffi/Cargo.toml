@@ -45,7 +45,9 @@ x25519-dalek = { version = "2", features = ["static_secrets"], optional = true }
 # keys and messages NorseHorsePGPCore can't handle (RSA, NIST curves,
 # GnuPG's AEAD packets). Android has BouncyCastle and leaves this off, so
 # its build surface and reproducible .so are unchanged.
-pgp = { version = "=0.20.0", optional = true }
+pgp = { version = "0.21", features = ["pqc"], optional = true }
+num-bigint-dig = { version = "0.8", features = ["rand", "zeroize"], optional = true }
+num-traits = { version = "0.2", optional = true }
 rand = { version = "0.8", optional = true }
 rsa = { version = "0.9", optional = true }
 
@@ -65,7 +67,7 @@ age-pq = [
     "dep:sha3",
     "dep:x25519-dalek",
 ]
-pgp-engine = ["dep:pgp", "dep:rand", "dep:rsa"]
+pgp-engine = ["dep:pgp", "dep:rand", "dep:rsa", "dep:num-bigint-dig", "dep:num-traits"]
 
 [[bin]]
 name = "uniffi-bindgen"

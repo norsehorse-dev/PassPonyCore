@@ -22,8 +22,8 @@ use std::io::Cursor;
 use std::sync::Arc;
 
 use pgp::composed::{
-    DecryptionOptions, Deserializable, Message, MessageBuilder, SignedPublicKey,
-    SignedPublicSubKey, SignedSecretKey, TheRing,
+    DecryptionOptions, Deserializable, Esk, Message, MessageBuilder, PlainSessionKey,
+    SignedPublicKey, SignedPublicSubKey, SignedSecretKey, TheRing,
 };
 use pgp::crypto::sym::SymmetricKeyAlgorithm;
 use pgp::packet::{Signature, SignatureType};
@@ -170,7 +170,9 @@ impl PgpEngine {
             secret_keys: self.secret.iter().collect(),
             key_passwords: vec![&empty],
             message_password: Vec::new(),
-            session_keys: Vec::new(),
+            // ElGamal and brainpool keys: rpgp has no arithmetic for
+            // them, so their session keys are worked out here.
+            session_keys: self.legacy_session_keys(&message),
             // Modern GnuPG writes its pre-RFC 9580 AEAD (OCB) packets by
             // default when every recipient key advertises support.
             decrypt_options: DecryptionOptions::new().enable_gnupg_aead(),
@@ -246,6 +248,54 @@ impl PgpEngine {
 }
 
 impl PgpEngine {
+    /// Session keys from the message's PKESKs that were made for one of
+    /// this engine's ElGamal or brainpool keys. See `pgp_legacy`.
+    fn legacy_session_keys(&self, message: &Message<'_>) -> Vec<PlainSessionKey> {
+        let Message::Encrypted { esk, .. } = message else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for packet in esk {
+            let Esk::PublicKeyEncryptedSessionKey(pkesk) = packet else {
+                continue;
+            };
+            let Ok(values) = pkesk.values() else {
+                continue;
+            };
+            for key in &self.secret {
+                let primary = &key.primary_key;
+                let mut candidates = vec![(
+                    primary.public_params(),
+                    primary.secret_params(),
+                    primary.fingerprint(),
+                    pkesk.match_identity(primary),
+                )];
+                for sub in &key.secret_subkeys {
+                    candidates.push((
+                        sub.key.public_params(),
+                        sub.key.secret_params(),
+                        sub.key.fingerprint(),
+                        pkesk.match_identity(&sub.key),
+                    ));
+                }
+                for (public, secret, fingerprint, matches) in candidates {
+                    if !matches || !crate::pgp_legacy::is_legacy(public) {
+                        continue;
+                    }
+                    if let Some(session_key) = crate::pgp_legacy::session_key(
+                        values,
+                        public,
+                        secret,
+                        fingerprint.as_bytes(),
+                    ) {
+                        out.push(session_key);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Match a `.gpg-id` line the way PGPonyEngine.resolve() does.
     fn resolve(&self, spec: &str) -> Option<&SignedPublicKey> {
         let needle = spec.to_uppercase().replace("0X", "").replace(' ', "");
@@ -273,7 +323,14 @@ fn target_encrypt_v1<R: rand::CryptoRng + rand::Rng>(
     rng: &mut R,
     target: Target<'_>,
 ) -> Result<(), CryptoError> {
+    use crate::pgp_legacy::{is_legacy, LegacyRecipient};
     let r = match target {
+        Target::Subkey(k) if is_legacy(k.key.public_params()) => {
+            builder.encrypt_to_key(&mut *rng, &LegacyRecipient(&k.key))
+        }
+        Target::Primary(k) if is_legacy(k.primary_key.public_params()) => {
+            builder.encrypt_to_key(&mut *rng, &LegacyRecipient(&k.primary_key))
+        }
         Target::Subkey(k) => builder.encrypt_to_key(&mut *rng, &k.key),
         Target::Primary(k) => builder.encrypt_to_key(&mut *rng, &k.primary_key),
     };
@@ -765,6 +822,136 @@ mod tests {
         assert_eq!(
             pgp_key_lock_state(locked(), Some(PASS.into())),
             PgpLockState::Unlocked
+        );
+    }
+
+    // --- ElGamal and brainpool keys (pgp_legacy) ---------------------------
+
+    macro_rules! legacy {
+        ($name:literal) => {
+            include_bytes!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../fixtures/pgp-legacy/",
+                $name
+            ))
+            .to_vec()
+        };
+    }
+
+    /// (secret key, gpg's entry, fingerprint, passphrase) per fixture.
+    fn legacy_fixtures() -> Vec<(&'static str, Vec<u8>, Vec<u8>, String, Option<&'static str>)> {
+        vec![
+            (
+                "dsa-elg",
+                legacy!("dsa-elg.sec.gpg"),
+                legacy!("dsa-elg.gpg"),
+                fpr(legacy!("dsa-elg.fpr")),
+                None,
+            ),
+            (
+                "dsa-elg-locked",
+                legacy!("dsa-elg-locked.sec.gpg"),
+                legacy!("dsa-elg-locked.gpg"),
+                fpr(legacy!("dsa-elg-locked.fpr")),
+                Some("pony-pass"),
+            ),
+            (
+                "rsa-elg",
+                legacy!("rsa-elg.sec.gpg"),
+                legacy!("rsa-elg.gpg"),
+                fpr(legacy!("rsa-elg.fpr")),
+                None,
+            ),
+            (
+                "bp256",
+                legacy!("bp256.sec.gpg"),
+                legacy!("bp256.gpg"),
+                fpr(legacy!("bp256.fpr")),
+                None,
+            ),
+            (
+                "bp384",
+                legacy!("bp384.sec.gpg"),
+                legacy!("bp384.gpg"),
+                fpr(legacy!("bp384.fpr")),
+                None,
+            ),
+            (
+                "bp512",
+                legacy!("bp512.sec.gpg"),
+                legacy!("bp512.gpg"),
+                fpr(legacy!("bp512.fpr")),
+                None,
+            ),
+        ]
+    }
+
+    #[test]
+    fn decrypts_gpg_entries_for_elgamal_and_brainpool_keys() {
+        let plain = legacy!("plaintext.txt");
+        for (name, key, entry, _, pass) in legacy_fixtures() {
+            let e = engine(vec![key], pass);
+            assert_eq!(e.decrypt(entry).unwrap(), plain, "{name}");
+        }
+    }
+
+    #[test]
+    fn encrypts_to_elgamal_and_brainpool_keys_and_reads_it_back() {
+        let plain = legacy!("plaintext.txt");
+        for (name, key, _, fingerprint, pass) in legacy_fixtures() {
+            let e = engine(vec![key], pass);
+            let entry = e.encrypt(plain.clone(), vec![fingerprint]).unwrap();
+            assert_eq!(e.decrypt(entry).unwrap(), plain, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_locked_elgamal_key_without_its_passphrase_is_no_usable_key() {
+        let e = engine(vec![legacy!("dsa-elg-locked.sec.gpg")], None);
+        assert_eq!(e.blob_lock_states(), vec![PgpLockState::PassphraseRequired]);
+        assert!(matches!(
+            e.decrypt(legacy!("dsa-elg-locked.gpg")),
+            Err(CryptoError::NoUsableKey)
+        ));
+    }
+
+    #[test]
+    fn an_entry_for_one_legacy_key_does_not_open_with_another() {
+        let e = engine(
+            vec![legacy!("bp256.sec.gpg"), legacy!("dsa-elg.sec.gpg")],
+            None,
+        );
+        assert!(matches!(
+            e.decrypt(legacy!("bp384.gpg")),
+            Err(CryptoError::NoUsableKey)
+        ));
+        assert!(matches!(
+            e.decrypt(legacy!("rsa-elg.gpg")),
+            Err(CryptoError::NoUsableKey)
+        ));
+    }
+
+    #[test]
+    fn a_mixed_recipient_entry_opens_with_either_key() {
+        let plain = legacy!("plaintext.txt");
+        let both = engine(vec![legacy!("bp512.sec.gpg"), fx!("rsa.sec.asc")], None);
+        let entry = both
+            .encrypt(
+                plain.clone(),
+                vec![fpr(legacy!("bp512.fpr")), fpr(fx!("rsa.fpr"))],
+            )
+            .unwrap();
+        assert_eq!(
+            engine(vec![legacy!("bp512.sec.gpg")], None)
+                .decrypt(entry.clone())
+                .unwrap(),
+            plain
+        );
+        assert_eq!(
+            engine(vec![fx!("rsa.sec.asc")], None)
+                .decrypt(entry)
+                .unwrap(),
+            plain
         );
     }
 }
